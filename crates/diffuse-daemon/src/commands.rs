@@ -290,15 +290,13 @@ pub async fn query(
     println!("{}", "  ◆ DIFFUSE — query".bright_cyan().bold());
     println!("  node {}", identity.short_id().dimmed());
 
-    if bootstrap_sentinels.is_empty() {
-        anyhow::bail!("query needs at least one --bootstrap sentinel to find the network");
-    }
+    let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
 
     let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
 
     println!("  {} discovering network...", "→".bright_blue());
     crate::discovery::bootstrap(
-        bootstrap_sentinels,
+        &sentinels,
         identity.signing_public().to_vec(),
         &registry,
     )
@@ -365,12 +363,13 @@ async fn discover_network(
     bootstrap_sentinels: &[String],
     identity: &Identity,
 ) -> anyhow::Result<Arc<Mutex<PeerRegistry>>> {
-    if bootstrap_sentinels.is_empty() {
-        anyhow::bail!("need at least one --bootstrap sentinel to find the network");
+    let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
+    if sentinels.is_empty() {
+        anyhow::bail!("no sentinels available to find the network");
     }
     let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
     crate::discovery::bootstrap(
-        bootstrap_sentinels,
+        &sentinels,
         identity.signing_public().to_vec(),
         &registry,
     )

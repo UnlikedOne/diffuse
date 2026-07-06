@@ -1,5 +1,15 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+pub const DEFAULT_SENTINELS: &[&str] = &["http://204.168.151.107:9440"];
+
+pub fn resolve_sentinels(provided: &[String]) -> Vec<String> {
+    if provided.is_empty() {
+        DEFAULT_SENTINELS.iter().map(|s| s.to_string()).collect()
+    } else {
+        provided.to_vec()
+    }
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 pub enum Mode {
     Private,
