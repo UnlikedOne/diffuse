@@ -1,0 +1,37 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --bin diffuse
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/diffuse dist/diffuse-linux-x86_64
+          cd dist && sha256sum diffuse-linux-x86_64 > diffuse-linux-x86_64.sha256
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/diffuse-linux-x86_64
+            dist/diffuse-linux-x86_64.sha256
