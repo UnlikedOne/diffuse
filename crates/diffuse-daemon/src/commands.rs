@@ -139,7 +139,21 @@ pub async fn host(
         None
     };
 
-    let mut worker = WorkerHandle::connect(worker_endpoint.to_string()).await?;
+    let mut worker = {
+        let mut attempts = 0;
+        loop {
+            match WorkerHandle::connect(worker_endpoint.to_string()).await {
+                Ok(w) => break w,
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= 30 {
+                        return Err(anyhow::anyhow!("worker never came up: {}", e));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    };
     let profile = worker.profile_model(model, overhead).await?;
     println!(
         "  {} machine holds up to {} layers of {}",
