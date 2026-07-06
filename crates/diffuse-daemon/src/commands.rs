@@ -118,6 +118,7 @@ pub async fn host(
     bootstrap_sentinels: &[String],
     overhead: f64,
     spawn_worker: bool,
+    public_addr: Option<String>,
     identity: Identity,
 ) -> anyhow::Result<()> {
     println!();
@@ -177,7 +178,8 @@ pub async fn host(
         .await?;
     println!("  {} slice loaded and ready", "✓".bright_green());
 
-    let daemon_endpoint = format!("http://{}", listen);
+    let announce_addr = public_addr.as_deref().unwrap_or(listen);
+    let daemon_endpoint = format!("http://{}", announce_addr);
     let mut self_peer = Peer {
         node_id: identity.signing_public().to_vec(),
         daemon_endpoint: daemon_endpoint.clone(),

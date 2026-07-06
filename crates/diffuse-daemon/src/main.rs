@@ -30,13 +30,8 @@ async fn main() -> anyhow::Result<()> {
             spares,
         } => commands::demo(stage_a, stage_b, model, prompt, spares, identity).await,
         Command::Host {
-            model,
-            worker,
-            listen,
-            bootstrap,
-            overhead,
-            spawn_worker,
-        } => commands::host(&model, &worker, &listen, &bootstrap, overhead, spawn_worker, identity).await,
+            model, worker, listen, bootstrap, overhead, spawn_worker, public_addr,
+        } => commands::host(&model, &worker, &listen, &bootstrap, overhead, spawn_worker, public_addr, identity).await,
         Command::Query {
             model,
             prompt,

@@ -53,6 +53,8 @@ pub enum Command {
         overhead: f64,
         #[arg(long, default_value_t = false)]
         spawn_worker: bool,
+        #[arg(long)]
+        public_addr: Option<String>,
     },
     /// Query the network: discover a servable model, route through it, generate
     Query {
