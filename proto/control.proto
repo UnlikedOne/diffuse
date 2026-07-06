@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package diffuse.control;
+
+message NodeId {
+  bytes public_key = 1;
+}
+
+message SliceRange {
+  string model_id = 1;
+  uint32 start_layer = 2;
+  uint32 end_layer = 3;
+}
+
+message Heartbeat {
+  NodeId node = 1;
+  uint64 timestamp_ms = 2;
+  repeated SliceRange hosted_slices = 3;
+  float load = 4;
+  bytes signature = 5;
+}
+
+message SliceAnnouncement {
+  NodeId node = 1;
+  SliceRange slice = 2;
+  string endpoint = 3;
+  bytes signature = 4;
+}
+
+message RouteRequest {
+  string model_id = 1;
+  string session_id = 2;
+}
+
+message RouteHop {
+  NodeId node = 1;
+  SliceRange slice = 2;
+  string endpoint = 3;
+}
+
+message Route {
+  string session_id = 1;
+  repeated RouteHop hops = 2;
+}

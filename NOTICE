@@ -1,0 +1,17 @@
+Diffuse
+Copyright (C) 2026 UnlikedOne
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This project is inspired by the distributed inference architecture of
+Petals (BigScience workshop, https://github.com/bigscience-workshop/petals),
+released under the MIT License. Diffuse reimplements these concepts from
+scratch and shares no source code with Petals.
+
+Diffuse extends the distributed-inference model with a privacy layer
+(trusted execution, context threat model), a contribution-incentive layer
+(usage credit), and product-grade deployment (self-configuring daemon,
+private-team mode).

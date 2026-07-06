@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package diffuse.data;
+
+message Tensor {
+  repeated int64 shape = 1;
+  string dtype = 2;
+  bytes data = 3;
+}
+
+message SliceRequest {
+  string model_id = 1;
+  uint32 start_layer = 2;
+  uint32 end_layer = 3;
+  string session_id = 4;
+  uint64 position = 5;
+  Tensor activations = 6;
+  bool use_cache = 7;
+}
+
+message SliceResponse {
+  string session_id = 1;
+  Tensor activations = 2;
+  bool ok = 3;
+  string error = 4;
+}
+
+message LoadSliceRequest {
+  string model_id = 1;
+  uint32 start_layer = 2;
+  uint32 end_layer = 3;
+  string hf_token = 4;
+}
+
+message LoadSliceResponse {
+  bool ok = 1;
+  string error = 2;
+  uint32 total_layers = 3;
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message EncodeRequest {
+  string text = 1;
+  bool apply_chat_template = 2;
+  repeated ChatMessage messages = 3;
+}
+
+message EncodeResponse {
+  repeated int64 token_ids = 1;
+  bool ok = 2;
+  string error = 3;
+  int64 eos_token_id = 4;
+}
+
+message DecodeRequest {
+  repeated int64 token_ids = 1;
+  bool skip_special_tokens = 2;
+}
+
+message DecodeResponse {
+  string text = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  bool slice_loaded = 2;
+  uint32 start_layer = 3;
+  uint32 end_layer = 4;
+}
+
+message ProfileRequest {
+  string model_id = 1;
+  string hf_token = 2;
+  double overhead_fraction = 3;
+}
+
+message ProfileResponse {
+  bool ok = 1;
+  string error = 2;
+  uint32 total_layers = 3;
+  uint64 avg_layer_bytes = 4;
+  uint64 non_layer_bytes = 5;
+  uint64 available_bytes = 6;
+  uint32 max_layers = 7;
+  uint32 max_layers_if_holding_embedding = 8;
+  string device = 9;
+}
+
+service InferenceWorker {
+  rpc LoadSlice(LoadSliceRequest) returns (LoadSliceResponse);
+  rpc RunSlice(SliceRequest) returns (SliceResponse);
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+  rpc Decode(DecodeRequest) returns (DecodeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc ProfileModel(ProfileRequest) returns (ProfileResponse);
+}

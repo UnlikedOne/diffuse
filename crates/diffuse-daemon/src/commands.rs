@@ -1,0 +1,610 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use owo_colors::OwoColorize;
+
+use crate::capacity::{analyze, assign_slice};
+use crate::discovery::bootstrap;
+use crate::identity::Identity;
+use crate::registry::PeerRegistry;
+use crate::worker::WorkerHandle;
+use tokio::sync::Mutex;
+use crate::gossip::spawn_gossip_server;
+use crate::compute::spawn_compute_server;
+use crate::discovery::spawn_gossip_loop;
+use crate::registry::{now_ms, Peer};
+use diffuse_trust::crypto::sign;
+
+
+fn human_bytes(b: u64) -> String {
+    let gb = b as f64 / 1_073_741_824.0;
+    if gb >= 1.0 {
+        format!("{:.1} GB", gb)
+    } else {
+        format!("{:.0} MB", b as f64 / 1_048_576.0)
+    }
+}
+
+pub async fn plan(
+    model: &str,
+    worker_endpoint: &str,
+    overhead: f64,
+    bootstrap_sentinels: &[String],
+    identity: &Identity,
+) -> anyhow::Result<()> {
+    println!();
+    println!("{}", "  ◆ DIFFUSE — capacity plan".bright_cyan().bold());
+    println!("  node {}", identity.short_id().dimmed());
+    println!();
+
+    let mut worker = WorkerHandle::connect(worker_endpoint.to_string()).await?;
+
+    println!("  {} profiling this machine...", "→".bright_blue());
+    let profile = worker.profile_model(model, overhead).await?;
+
+    println!(
+        "    device: {}   available: {}",
+        profile.device.bright_white(),
+        human_bytes(profile.available_bytes).bright_white()
+    );
+    println!(
+        "    model {}: {} layers, ~{} per layer",
+        model.bright_white(),
+        profile.total_layers.to_string().bright_white(),
+        human_bytes(profile.avg_layer_bytes).bright_white()
+    );
+    println!(
+        "    this machine can hold up to {} layers",
+        profile.max_layers.to_string().bright_green().bold()
+    );
+    println!();
+
+    let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
+    if !bootstrap_sentinels.is_empty() {
+        println!("  {} contacting sentinels for network view...", "→".bright_blue());
+        bootstrap(bootstrap_sentinels, identity.signing_public().to_vec(), &registry).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let caps = {
+        let reg = registry.lock().await;
+        analyze(&reg)
+    };
+
+    let assignment = assign_slice(
+        &caps,
+        model,
+        profile.total_layers,
+        profile.max_layers,
+        2,
+    );
+
+    match assignment {
+        Some(a) => {
+            println!("  {} recommended assignment:", "◆".bright_green().bold());
+            println!(
+                "    hold slice {}   ({})",
+                format!("{}:{}", a.start, a.end).bright_green().bold(),
+                a.reason.dimmed()
+            );
+        }
+        None => {
+            println!(
+                "  {} this machine cannot hold any slice of {} (too large)",
+                "✗".red().bold(),
+                model
+            );
+        }
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn demo(
+    stage_a: Vec<String>,
+    stage_b: Vec<String>,
+    model: String,
+    prompt: Option<String>,
+    spares: Vec<String>,
+    identity: Identity,
+) -> anyhow::Result<()> {
+    crate::lifecycle::run_demo(stage_a, stage_b, model, prompt, spares, identity).await
+}
+
+pub async fn host(
+    model: &str,
+    worker_endpoint: &str,
+    listen: &str,
+    bootstrap_sentinels: &[String],
+    overhead: f64,
+    spawn_worker: bool,
+    identity: Identity,
+) -> anyhow::Result<()> {
+    println!();
+    println!("{}", "  ◆ DIFFUSE — joining network".bright_cyan().bold());
+    println!("  node {}", identity.short_id().dimmed());
+
+    let _worker_child = if spawn_worker {
+        let port: u16 = worker_endpoint
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(50051);
+        println!("  {} starting local worker on port {}...", "→".bright_blue(), port);
+        let child = spawn_local_worker(port)?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        Some(child)
+    } else {
+        None
+    };
+
+    let mut worker = WorkerHandle::connect(worker_endpoint.to_string()).await?;
+    let profile = worker.profile_model(model, overhead).await?;
+    println!(
+        "  {} machine holds up to {} layers of {}",
+        "→".bright_blue(),
+        profile.max_layers.to_string().bright_green().bold(),
+        model.bright_white()
+    );
+
+    let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
+
+    if !bootstrap_sentinels.is_empty() {
+        crate::discovery::bootstrap(
+            bootstrap_sentinels,
+            identity.signing_public().to_vec(),
+            &registry,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let caps = { analyze(&*registry.lock().await) };
+    let assignment = assign_slice(&caps, model, profile.total_layers, profile.max_layers, 2)
+        .ok_or_else(|| anyhow::anyhow!("machine too small to hold any slice of {}", model))?;
+
+    println!(
+        "  {} taking slice {}   ({})",
+        "◆".bright_green().bold(),
+        format!("{}:{}", assignment.start, assignment.end)
+            .bright_green()
+            .bold(),
+        assignment.reason.dimmed()
+    );
+
+    worker
+        .load_slice(model, assignment.start, assignment.end, "")
+        .await?;
+    println!("  {} slice loaded and ready", "✓".bright_green());
+
+    let daemon_endpoint = format!("http://{}", listen);
+    let mut self_peer = Peer {
+        node_id: identity.signing_public().to_vec(),
+        daemon_endpoint: daemon_endpoint.clone(),
+        worker_endpoint: worker_endpoint.to_string(),
+        model_id: model.to_string(),
+        start_layer: assignment.start,
+        end_layer: assignment.end,
+        last_seen_ms: now_ms(),
+        signature: Vec::new(),
+        kx_public: identity.kx_public().to_vec(),
+    };
+    self_peer.signature = sign(&identity.signing_key, &self_peer.signable_bytes());
+    registry.lock().await.upsert(self_peer);
+
+    let self_node_id = identity.signing_public().to_vec();
+    let self_kx_public = identity.kx_public().to_vec();
+    let signing_key = identity.signing_key.clone();
+    let shared_worker = Arc::new(Mutex::new(worker));
+    let identity_kx = Arc::new(identity.key_exchange);
+
+    let addr: std::net::SocketAddr = listen.parse()?;
+    spawn_gossip_server(addr, Arc::clone(&registry));
+
+    let compute_port = addr.port() + 1000;
+    let compute_addr: std::net::SocketAddr =
+        format!("{}:{}", addr.ip(), compute_port).parse()?;
+    spawn_compute_server(compute_addr, identity_kx, shared_worker, model.to_string());
+
+    println!(
+        "  {} serving — gossip {} / compute {}",
+        "✓".bright_green(),
+        daemon_endpoint.bright_white(),
+        format!("http://{}", compute_addr).bright_white()
+    );
+
+    spawn_gossip_loop(
+        self_node_id.clone(),
+        daemon_endpoint.clone(),
+        Arc::clone(&registry),
+        Duration::from_secs(5),
+        3,
+    );
+
+    println!();
+    println!("  {} node is live. Press Ctrl+C to leave.", "●".bright_green());
+    println!();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        {
+            let mut reg = registry.lock().await;
+            let mut fresh = Peer {
+                node_id: self_node_id.clone(),
+                daemon_endpoint: daemon_endpoint.clone(),
+                worker_endpoint: worker_endpoint.to_string(),
+                model_id: model.to_string(),
+                start_layer: assignment.start,
+                end_layer: assignment.end,
+                last_seen_ms: now_ms(),
+                signature: Vec::new(),
+                kx_public: self_kx_public.clone(),
+            };
+            fresh.signature = sign(&signing_key, &fresh.signable_bytes());
+            reg.upsert(fresh);
+        }
+        let caps = { analyze(&*registry.lock().await) };
+        let n = registry.lock().await.len();
+        crate::display::render_network_state(&caps, n, 2);
+    }
+}
+
+fn spawn_local_worker(port: u16) -> anyhow::Result<std::process::Child> {
+    let worker_dir = std::env::var("DIFFUSE_WORKER_DIR").unwrap_or_else(|_| "worker".to_string());
+    let python = format!("{}/.venv/bin/python", worker_dir);
+    let child = std::process::Command::new(python)
+        .arg("-m")
+        .arg("diffuse_worker")
+        .env("DIFFUSE_WORKER_PORT", port.to_string())
+        .current_dir(&worker_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(child)
+}
+
+pub async fn query(
+    model: &str,
+    prompt: &str,
+    bootstrap_sentinels: &[String],
+    max_tokens: usize,
+    identity: Identity,
+) -> anyhow::Result<()> {
+    println!();
+    println!("{}", "  ◆ DIFFUSE — query".bright_cyan().bold());
+    println!("  node {}", identity.short_id().dimmed());
+
+    if bootstrap_sentinels.is_empty() {
+        anyhow::bail!("query needs at least one --bootstrap sentinel to find the network");
+    }
+
+    let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
+
+    println!("  {} discovering network...", "→".bright_blue());
+    crate::discovery::bootstrap(
+        bootstrap_sentinels,
+        identity.signing_public().to_vec(),
+        &registry,
+    )
+    .await;
+
+    spawn_gossip_loop(
+        identity.signing_public().to_vec(),
+        "http://127.0.0.1:0".to_string(),
+        Arc::clone(&registry),
+        Duration::from_secs(2),
+        3,
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let caps = { analyze(&*registry.lock().await) };
+    let cap = caps
+        .iter()
+        .find(|c| c.model_id == model)
+        .ok_or_else(|| anyhow::anyhow!("model {} not found on the network", model))?;
+
+    if !cap.servable {
+        anyhow::bail!("model {} is present but not fully servable", model);
+    }
+
+    println!(
+        "  {} {} is servable, starting local tokenizer...",
+        "✓".bright_green(),
+        model.bright_white()
+    );
+
+    // Local lightweight tokenizer worker (privacy: tokens never leave the client).
+    let tok_port: u16 = 50099;
+    let _tok_child = spawn_local_worker(tok_port)?;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let tok_endpoint = format!("http://127.0.0.1:{}", tok_port);
+    let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
+    tokenizer_worker.load_slice(model, 0, 0, "").await?;
+
+    println!("  {} building encrypted route...", "→".bright_blue());
+    let mut orch = {
+        let reg = registry.lock().await;
+        crate::orchestrator::build_from_registry(model, &reg, 2, Vec::new()).await?
+    };
+
+    // Encode locally (tokens stay here).
+    let (ids, eos) = tokenizer_worker.encode(prompt, true).await?;
+
+    println!("  {} generating over encrypted channel...", "→".bright_blue());
+    println!();
+
+    let out = orch.generate(&ids, max_tokens, "query-session", Some(eos)).await?;
+    tracing::info!("generated {} tokens total, {} new", out.len(), out.len() - ids.len());
+    tracing::info!("new token ids: {:?}", &out[ids.len()..]);
+    let text = tokenizer_worker.decode(&out[ids.len()..], true).await?;
+    tracing::info!("decoded text length: {}", text.len());
+
+    println!("  {}", "answer:".bright_green().bold());
+    println!("  {}", text);
+    println!();
+    Ok(())
+}
+
+async fn discover_network(
+    bootstrap_sentinels: &[String],
+    identity: &Identity,
+) -> anyhow::Result<Arc<Mutex<PeerRegistry>>> {
+    if bootstrap_sentinels.is_empty() {
+        anyhow::bail!("need at least one --bootstrap sentinel to find the network");
+    }
+    let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
+    crate::discovery::bootstrap(
+        bootstrap_sentinels,
+        identity.signing_public().to_vec(),
+        &registry,
+    )
+    .await;
+    spawn_gossip_loop(
+        identity.signing_public().to_vec(),
+        "http://127.0.0.1:0".to_string(),
+        Arc::clone(&registry),
+        Duration::from_secs(2),
+        3,
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Ok(registry)
+}
+
+pub async fn models(bootstrap_sentinels: &[String], identity: Identity) -> anyhow::Result<()> {
+    println!();
+    println!("{}", "  ◆ DIFFUSE — models on the network".bright_cyan().bold());
+    println!();
+
+    let registry = discover_network(bootstrap_sentinels, &identity).await?;
+    let caps = { analyze(&*registry.lock().await) };
+    let n = registry.lock().await.len();
+    crate::display::render_network_state(&caps, n, 2);
+    Ok(())
+}
+
+pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identity) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    print!("\x1b[2J\x1b[H");
+    let _ = std::io::stdout().flush();
+
+    let registry = {
+        let spinner = start_spinner("connecting to the network");
+        let r = discover_network(bootstrap_sentinels, &identity).await;
+        spinner.finish_and_clear();
+        r?
+    };
+
+    let caps = { analyze(&*registry.lock().await) };
+    let servable: Vec<String> = caps
+        .iter()
+        .filter(|c| c.servable)
+        .map(|c| c.model_id.clone())
+        .collect();
+
+    if servable.is_empty() {
+        println!("  {}", "No servable models on the network right now.".truecolor(220, 120, 120));
+        return Ok(());
+    }
+
+    let model = if servable.len() == 1 {
+        servable[0].clone()
+    } else {
+        inquire::Select::new("Choose a model", servable.clone())
+            .prompt()
+            .map_err(|_| anyhow::anyhow!("no model selected"))?
+    };
+
+    render_banner(env!("CARGO_PKG_VERSION"), &model);
+    println!("  {}", "type your message, or /quit to leave".truecolor(120, 130, 150));
+    println!();
+
+    // Local tokenizer worker (tokens stay client-side).
+    let tok_port: u16 = 50099;
+    let _tok_child = {
+        let spinner = start_spinner("warming up");
+        let c = spawn_local_worker(tok_port);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        spinner.finish_and_clear();
+        c?
+    };
+    let tok_endpoint = format!("http://127.0.0.1:{}", tok_port);
+    let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
+    tokenizer_worker.load_slice(&model, 0, 0, "").await?;
+
+    let mut orch = {
+        let reg = registry.lock().await;
+        crate::orchestrator::build_from_registry(&model, &reg, 2, Vec::new()).await?
+    };
+
+    let mut history: Vec<(String, String)> = Vec::new();
+    let session_prefix = format!("{:016x}", now_ms());
+    let mut turn = 0u64;
+    
+    loop {
+        use std::io::Write as _;
+        print!("{} ", "›".truecolor(240, 200, 60).bold());
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+            break;
+        }
+
+        let msg = input.trim().to_string();
+        if msg.is_empty() {
+            continue;
+        }
+        if msg == "/quit" || msg == "/exit" {
+            println!();
+            println!("  {}", "goodbye.".truecolor(140, 140, 160));
+            break;
+        }
+        if msg == "/reset" {
+            history.clear();
+            println!("  {}", "conversation cleared.".truecolor(140, 140, 160));
+            println!();
+            continue;
+        }
+
+        turn += 1;
+        let session = format!("{}-{}", session_prefix, turn);
+
+        // Build the full conversation: past history + this new user message.
+        // With memory: send full history. Without (default): each message is standalone.
+        let messages = if memory {
+            let mut m = history.clone();
+            m.push(("user".to_string(), msg.clone()));
+            m
+        } else {
+            vec![("user".to_string(), msg.clone())]
+        };
+
+        let (ids, eos) = match tokenizer_worker.encode_messages(messages).await {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  {} {}", "encode error:".truecolor(220, 120, 120), e);
+                continue;
+            }
+        };
+
+        let spinner = start_spinner("thinking");
+        let out = orch.generate(&ids, 512, &session, Some(eos)).await;
+        spinner.finish_and_clear();
+
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                println!("  {} {}", "network error:".truecolor(220, 120, 120), e);
+                continue;
+            }
+        };
+
+        let answer = tokenizer_worker
+            .decode(&out[ids.len()..], true)
+            .await
+            .unwrap_or_default();
+
+        println!();
+        print!("  ");
+        stream_print(answer.trim());
+        println!();
+        println!();
+        println!();
+
+        // Persist the exchange so the model "remembers" next turn.
+        if memory {
+            history.push(("user".to_string(), msg));
+            history.push(("assistant".to_string(), answer.trim().to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+fn start_spinner(msg: &str) -> indicatif::ProgressBar {
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    pb
+}
+
+fn stream_print(text: &str) {
+    use std::io::Write;
+    for c in text.chars() {
+        print!("{}", c.to_string().truecolor(245, 220, 130));
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(7));
+    }
+}
+
+fn render_banner(version: &str, model: &str) {
+    let cyan = (90u8, 210u8, 235u8);
+    let cyan_dim = (60u8, 150u8, 175u8);
+    let red = (235u8, 70u8, 90u8);
+    let frame = (70u8, 80u8, 100u8);
+    let soft = (150u8, 160u8, 180u8);
+    let width: usize = 64;
+
+    let logo = [
+        "        ╭─────────────────╮        ",
+        "     ╭──┤  ◆   ◆   ◆   ◆  ├──╮     ",
+        "   ╭─┤  ╰─────────────────╯  ├─╮   ",
+        "   │ │  ·  D I F F U S E  ·  │ │   ",
+        "   ╰─┤  ╭─────────────────╮  ├─╯   ",
+        "     ╰──┤  ◆   ◆   ◆   ◆  ├──╯     ",
+        "        ╰─────────────────╯        ",
+    ];
+
+    let line = |s: &str, color: (u8, u8, u8), bold: bool| {
+        let len = s.chars().count();
+        let pad = width.saturating_sub(len);
+        let left = pad / 2;
+        let right = pad - left;
+        print!("  {}", "│".truecolor(frame.0, frame.1, frame.2));
+        print!("{}", " ".repeat(left));
+        if bold {
+            print!("{}", s.truecolor(color.0, color.1, color.2).bold());
+        } else {
+            print!("{}", s.truecolor(color.0, color.1, color.2));
+        }
+        print!("{}", " ".repeat(right));
+        println!("{}", "│".truecolor(frame.0, frame.1, frame.2));
+    };
+
+    println!();
+    println!(
+        "  {}{}{}",
+        "╭".truecolor(frame.0, frame.1, frame.2),
+        "─".repeat(width).truecolor(frame.0, frame.1, frame.2),
+        "╮".truecolor(frame.0, frame.1, frame.2)
+    );
+    line("", cyan, false);
+    for (i, l) in logo.iter().enumerate() {
+        // Le titre central (ligne 3) en cyan vif, le reste de l'anneau en cyan doux
+        if i == 3 {
+            line(l, cyan, true);
+        } else {
+            line(l, cyan_dim, true);
+        }
+    }
+    line("", cyan, false);
+    line("DECENTRALIZED PRIVATE INFERENCE", red, true);
+    line("", cyan, false);
+    line("no servers · no surveillance · no logs", cyan, true);
+    line("", cyan, false);
+    line(&format!("version {}", version), soft, false);
+    line(&format!("model   {}", model), soft, false);
+    line("", cyan, false);
+    println!(
+        "  {}{}{}",
+        "╰".truecolor(frame.0, frame.1, frame.2),
+        "─".repeat(width).truecolor(frame.0, frame.1, frame.2),
+        "╯".truecolor(frame.0, frame.1, frame.2)
+    );
+    println!();
+}

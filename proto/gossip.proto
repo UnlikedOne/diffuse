@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package diffuse.gossip;
+
+message PeerInfo {
+  bytes node_id = 1;
+  string daemon_endpoint = 2;
+  string worker_endpoint = 3;
+  string model_id = 4;
+  uint32 start_layer = 5;
+  uint32 end_layer = 6;
+  uint64 last_seen_ms = 7;
+  bytes signature = 8;
+  bytes kx_public = 9;
+}
+
+message GossipRequest {
+  bytes from_node_id = 1;
+  repeated PeerInfo known_peers = 2;
+}
+
+message GossipResponse {
+  repeated PeerInfo known_peers = 1;
+}
+
+service Gossip {
+  rpc Exchange(GossipRequest) returns (GossipResponse);
+}

@@ -1,0 +1,33 @@
+[project]
+name = "diffuse-worker"
+version = "0.1.0"
+description = "Diffuse inference worker: loads model slices and runs partial forward passes."
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "UnlikedOne" }]
+dependencies = [
+    "torch>=2.2",
+    "transformers>=4.44",
+    "safetensors>=0.4",
+    "grpcio>=1.66",
+    "grpcio-tools>=1.66",
+    "protobuf>=5.28",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["diffuse_worker*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

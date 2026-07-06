@@ -1,0 +1,35 @@
+[package]
+name = "diffuse-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "diffuse_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "diffuse"
+path = "src/main.rs"
+
+[dependencies]
+diffuse-trust = { path = "../diffuse-trust" }
+tokio.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+tonic.workspace = true
+prost.workspace = true
+bytemuck = "1"
+hex = "0.4"
+owo-colors = "4"
+inquire = "0.7"
+indicatif = "0.17"
+
+[build-dependencies]
+tonic-build = "0.12"

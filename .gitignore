@@ -1,0 +1,30 @@
+# Rust
+/target
+target/
+**/*.rs.bk
+*.pdb
+
+# Python
+worker/.venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Generated proto (Python)
+worker/diffuse_worker/*_pb2.py
+worker/diffuse_worker/*_pb2_grpc.py
+
+# Models / caches
+*.safetensors
+*.bin
+.cache/
+
+# OS / editor
+.DS_Store
+*.swp
+*.log
+prod_oauth.txt
+*.pem
+*.key

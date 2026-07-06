@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package diffuse.compute;
+
+message ComputeRequest {
+  bytes requester_kx_public = 1;
+  string model_id = 2;
+  uint32 start_layer = 3;
+  uint32 end_layer = 4;
+  string session_id = 5;
+  bytes encrypted_activations = 6;
+}
+
+message ComputeResponse {
+  bytes encrypted_activations = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+service Compute {
+  rpc RunSlice(ComputeRequest) returns (ComputeResponse);
+}

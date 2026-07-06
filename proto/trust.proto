@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package diffuse.trust;
+
+message Attestation {
+  bytes node_public_key = 1;
+  bytes enclave_quote = 2;
+  uint64 timestamp_ms = 3;
+}
+
+message ReputationEntry {
+  bytes node_public_key = 1;
+  float score = 2;
+  uint64 updated_ms = 3;
+}
+
+message CreditBalance {
+  bytes node_public_key = 1;
+  int64 balance = 2;
+}
