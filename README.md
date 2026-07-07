@@ -48,6 +48,7 @@ diffuse chat
 No account. No key. No server of your own. Zero configuration.
 
 <br>
+
 ## Use it
 
 ```bash
