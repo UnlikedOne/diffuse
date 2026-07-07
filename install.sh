@@ -21,7 +21,6 @@ fi
 for cmd in curl python3 git; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Missing required command: $cmd"
-    echo "Please install it and re-run."
     exit 1
   fi
 done
@@ -34,28 +33,33 @@ curl -fsSL "$LATEST_URL" -o "${BIN_DIR}/diffuse"
 chmod +x "${BIN_DIR}/diffuse"
 echo "Binary installed to ${BIN_DIR}/diffuse"
 
-echo "Fetching the source (for the worker)..."
+echo "Fetching the source..."
 TMP="$(mktemp -d)"
 git clone --depth 1 "https://github.com/${REPO}.git" "$TMP/diffuse" >/dev/null 2>&1
-
-echo "Setting up the worker environment (downloads PyTorch, may take a few minutes)..."
-python3 -m venv "$TMP/diffuse/worker/.venv"
-# shellcheck disable=SC1091
-source "$TMP/diffuse/worker/.venv/bin/activate"
-pip install --quiet --upgrade pip
-pip install --quiet "setuptools<82"
-pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
-pip install --quiet transformers safetensors grpcio grpcio-tools protobuf numpy psutil huggingface_hub
-pip install --quiet -e "$TMP/diffuse/worker"
-
-echo "Generating protobuf stubs..."
-( cd "$TMP/diffuse/worker" && bash scripts/gen_proto.sh )
-deactivate
 
 echo "Installing the worker to ${WORKER_DIR}..."
 rm -rf "$WORKER_DIR"
 cp -r "$TMP/diffuse/worker" "$WORKER_DIR"
+# proto/ is needed by gen_proto.sh, which looks two levels up from worker/scripts
+cp -r "$TMP/diffuse/proto" "${INSTALL_DIR}/proto"
 rm -rf "$TMP"
+
+echo "Setting up the worker environment (downloads PyTorch, may take a few minutes)..."
+python3 -m venv "${WORKER_DIR}/.venv"
+# shellcheck disable=SC1091
+source "${WORKER_DIR}/.venv/bin/activate"
+pip install --quiet --upgrade pip
+pip install --quiet "setuptools<82"
+pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+pip install --quiet transformers safetensors grpcio grpcio-tools protobuf numpy psutil huggingface_hub
+pip install --quiet -e "$WORKER_DIR"
+
+echo "Generating protobuf stubs..."
+( cd "$WORKER_DIR" && bash scripts/gen_proto.sh )
+deactivate
+
+# proto/ is only needed at generation time
+rm -rf "${INSTALL_DIR}/proto"
 
 echo
 echo "Diffuse is installed."
