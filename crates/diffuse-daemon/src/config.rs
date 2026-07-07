@@ -55,13 +55,13 @@ pub enum Command {
         model: String,
         #[arg(long, default_value = "http://127.0.0.1:50051")]
         worker: String,
-        #[arg(long, default_value = "127.0.0.1:9440")]
+        #[arg(long, default_value = "0.0.0.0:9440")]
         listen: String,
         #[arg(long, value_delimiter = ',')]
         bootstrap: Vec<String>,
         #[arg(long, default_value_t = 0.3)]
         overhead: f64,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = true)]
         spawn_worker: bool,
         #[arg(long)]
         public_addr: Option<String>,

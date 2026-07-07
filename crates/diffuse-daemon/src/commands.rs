@@ -265,8 +265,32 @@ pub async fn host(
     }
 }
 
+fn find_worker_dir() -> anyhow::Result<String> {
+    if let Ok(dir) = std::env::var("DIFFUSE_WORKER_DIR") {
+        return Ok(dir);
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(&home).join(".diffuse/worker"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("worker"));
+        }
+    }
+    candidates.push(std::path::PathBuf::from("worker"));
+    for c in &candidates {
+        if c.join(".venv/bin/python").exists() {
+            return Ok(c.to_string_lossy().into_owned());
+        }
+    }
+    anyhow::bail!(
+        "could not find the Diffuse worker. Install it (see install.sh) or set DIFFUSE_WORKER_DIR"
+    )
+}
+
 fn spawn_local_worker(port: u16) -> anyhow::Result<std::process::Child> {
-    let worker_dir = std::env::var("DIFFUSE_WORKER_DIR").unwrap_or_else(|_| "worker".to_string());
+    let worker_dir = find_worker_dir()?;
     let python = format!("{}/.venv/bin/python", worker_dir);
     let child = std::process::Command::new(python)
         .arg("-m")

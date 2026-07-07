@@ -1,0 +1,15 @@
+[Unit]
+Description=Diffuse host node
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/diffuse
+Environment=DIFFUSE_WORKER_DIR=/opt/diffuse/worker
+ExecStart=/opt/diffuse/diffuse host --model Qwen/Qwen2.5-0.5B-Instruct --worker http://127.0.0.1:50051 --listen 0.0.0.0:9440 --spawn-worker
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
