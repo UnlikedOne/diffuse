@@ -132,3 +132,21 @@ pub fn spawn_gossip_server(
         }
     })
 }
+
+pub fn spawn_prune_loop(
+    registry: Arc<Mutex<PeerRegistry>>,
+    interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let removed = {
+                let mut reg = registry.lock().await;
+                reg.prune()
+            };
+            if removed > 0 {
+                tracing::info!("pruned {} stale peer(s)", removed);
+            }
+        }
+    })
+}

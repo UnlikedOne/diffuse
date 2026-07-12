@@ -163,17 +163,16 @@ pub async fn host(
     );
 
     let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
-
-    if !bootstrap_sentinels.is_empty() {
+    let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
+    if !sentinels.is_empty() {
         crate::discovery::bootstrap(
-            bootstrap_sentinels,
+            &sentinels,
             identity.signing_public().to_vec(),
             &registry,
         )
         .await;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
     let caps = { analyze(&*registry.lock().await) };
     let assignment = assign_slice(&caps, model, profile.total_layers, profile.max_layers, 2)
         .ok_or_else(|| anyhow::anyhow!("machine too small to hold any slice of {}", model))?;
@@ -216,6 +215,10 @@ pub async fn host(
 
     let addr: std::net::SocketAddr = listen.parse()?;
     spawn_gossip_server(addr, Arc::clone(&registry));
+    crate::gossip::spawn_prune_loop(
+        Arc::clone(&registry),
+        std::time::Duration::from_secs(30),
+    );
 
     let compute_port = addr.port() + 1000;
     let compute_addr: std::net::SocketAddr =
