@@ -37,6 +37,15 @@ how many layers the client keeps locally. It is made hard, not proven impossible
 **Mid-pipeline plaintext.** Computation on each node happens in the clear in
 memory (no trusted execution environment or homomorphic encryption).
 
+**Relayed traffic metadata (nodes behind NAT).** A node that cannot accept
+inbound connections (behind NAT or a firewall) serves compute through a sentinel
+acting as a relay. The relayed compute payload stays end-to-end encrypted between
+the client and the serving node, so the relay never sees content. However, the
+relay does observe flow metadata for that traffic: which client talks to which
+node, timing, and volume. Users who must hide this metadata should serve only
+from directly reachable nodes, or place a network anonymity layer beneath
+Diffuse.
+
 **Content self-revelation.** If your prompt names you, no system can un-say it.
 
 **Sybil and reputation attacks.** There is no anti-Sybil mechanism yet. A single
