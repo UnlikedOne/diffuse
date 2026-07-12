@@ -3,6 +3,8 @@ use crate::registry::{Peer, PeerRegistry};
 use crate::worker::pb::Tensor;
 use crate::worker::WorkerHandle;
 use diffuse_trust::transport::KeyExchange;
+use crate::compute::pb::compute_client::ComputeClient;
+use tonic::transport::Channel;
 
 pub enum Replica {
     Local {
@@ -14,6 +16,7 @@ pub enum Replica {
         host_kx_public: [u8; 32],
         label: String,
         alive: bool,
+        client: Option<ComputeClient<Channel>>,
     },
 }
 
@@ -118,19 +121,39 @@ impl Stage {
                 Replica::Remote {
                     compute_endpoint,
                     host_kx_public,
+                    client,
                     ..
                 } => {
-                    request_slice(
-                        compute_endpoint,
-                        host_kx_public,
-                        session_kx,
-                        model_id,
-                        start,
-                        end,
-                        session_id,
-                        &input,
-                    )
-                    .await
+                    match client {
+                        Some(c) => {
+                            request_slice(
+                                c,
+                                host_kx_public,
+                                session_kx,
+                                model_id,
+                                start,
+                                end,
+                                session_id,
+                                &input,
+                            )
+                            .await
+                        }
+                        None => {
+                            // reconnect once if we never connected
+                            match crate::compute::connect_compute(compute_endpoint).await {
+                                Ok(mut c) => {
+                                    let r = request_slice(
+                                        &mut c, host_kx_public, session_kx, model_id,
+                                        start, end, session_id, &input,
+                                    )
+                                    .await;
+                                    *client = Some(c);
+                                    r
+                                }
+                                Err(e) => Err(anyhow::anyhow!("connect failed: {}", e)),
+                            }
+                        }
+                    }
                 }
             };
             match attempt {
@@ -462,11 +485,19 @@ pub async fn build_from_registry(
                 start,
                 end
             );
+            let client = match crate::compute::connect_compute(&compute_endpoint).await {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!("could not pre-connect to {}: {}", compute_endpoint, e);
+                    None
+                }
+            };
             replicas.push(Replica::Remote {
                 compute_endpoint,
                 host_kx_public: kx,
                 label: peer.daemon_endpoint.clone(),
                 alive: true,
+                client,
             });
         }
         if replicas.is_empty() {

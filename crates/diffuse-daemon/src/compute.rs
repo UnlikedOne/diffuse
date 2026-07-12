@@ -105,8 +105,18 @@ impl Compute for ComputeService {
     }
 }
 
+pub async fn connect_compute(
+    endpoint: &str,
+) -> anyhow::Result<ComputeClient<tonic::transport::Channel>> {
+    let client = ComputeClient::connect(endpoint.to_string())
+        .await?
+        .max_decoding_message_size(128 * 1024 * 1024)
+        .max_encoding_message_size(128 * 1024 * 1024);
+    Ok(client)
+}
+
 pub async fn request_slice(
-    daemon_endpoint: &str,
+    client: &mut ComputeClient<tonic::transport::Channel>,
     host_kx_public: &[u8; 32],
     my_kx: &KeyExchange,
     model_id: &str,
@@ -118,11 +128,6 @@ pub async fn request_slice(
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
-
-    let mut client = ComputeClient::connect(daemon_endpoint.to_string())
-        .await?
-        .max_decoding_message_size(128 * 1024 * 1024)
-        .max_encoding_message_size(128 * 1024 * 1024);
     let response = client
         .run_slice(ComputeRequest {
             requester_kx_public: my_kx.public_bytes().to_vec(),
@@ -134,7 +139,6 @@ pub async fn request_slice(
         })
         .await?
         .into_inner();
-
     if !response.ok {
         anyhow::bail!("remote compute failed: {}", response.error);
     }

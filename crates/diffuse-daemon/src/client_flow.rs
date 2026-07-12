@@ -68,8 +68,9 @@ impl ClientSession {
             )
             .await?;
 
+        let mut client = crate::compute::connect_compute(&self.remote.daemon_endpoint).await?;
         let (logits, _compute_ms) = request_slice(
-            &self.remote.daemon_endpoint,
+            &mut client,
             &self.remote.host_kx_public,
             &self.client_kx,
             &self.model_id,
