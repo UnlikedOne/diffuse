@@ -66,6 +66,11 @@ fn merge_authentic(registry: &mut PeerRegistry, incoming: Vec<Peer>) -> usize {
     accepted
 }
 
+fn extract_port(endpoint: &str) -> Option<u16> {
+    let after_scheme = endpoint.strip_prefix("http://").unwrap_or(endpoint);
+    after_scheme.rsplit(':').next()?.parse().ok()
+}
+
 pub struct GossipService {
     pub registry: Arc<Mutex<PeerRegistry>>,
 }
@@ -94,21 +99,30 @@ impl Gossip for GossipService {
         &self,
         request: Request<ReachabilityRequest>,
     ) -> Result<Response<ReachabilityResponse>, Status> {
+        let source_ip = request
+            .remote_addr()
+            .map(|a| a.ip())
+            .ok_or_else(|| Status::internal("cannot determine caller ip"))?;
+
         let req = request.into_inner();
-        let endpoint = req.compute_endpoint;
-        let addr = endpoint
-            .strip_prefix("http://")
-            .unwrap_or(&endpoint)
-            .to_string();
-        let reachable = match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            tokio::net::TcpStream::connect(&addr),
-        )
-        .await
-        {
-            Ok(Ok(_)) => true,
-            _ => false,
+        let port = extract_port(&req.compute_endpoint).unwrap_or(0);
+        if port == 0 {
+            return Err(Status::invalid_argument("bad compute endpoint port"));
+        }
+
+        let addr = match source_ip {
+            std::net::IpAddr::V4(v4) => format!("{}:{}", v4, port),
+            std::net::IpAddr::V6(v6) => format!("[{}]:{}", v6, port),
         };
+
+        let reachable = matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await,
+            Ok(Ok(_))
+        );
         tracing::info!("reachability check for {}: {}", addr, reachable);
         Ok(Response::new(ReachabilityResponse { reachable }))
     }
