@@ -15,6 +15,7 @@ message ComputeResponse {
   bytes encrypted_activations = 1;
   bool ok = 2;
   string error = 3;
+  uint64 compute_ms = 4;
 }
 
 service Compute {

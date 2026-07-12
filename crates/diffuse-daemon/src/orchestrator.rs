@@ -42,6 +42,8 @@ pub struct Stage {
     pub start_layer: u32,
     pub end_layer: u32,
     pub replicas: Vec<Replica>,
+    pub last_compute_ms: u64,
+    pub last_network_ms: u64,
 }
 
 pub struct Orchestrator {
@@ -50,6 +52,8 @@ pub struct Orchestrator {
     pub spare_endpoints: Vec<String>,
     pub target_replication: usize,
     pub session_kx: KeyExchange,
+    pub last_forward_compute_ms: u64,
+    pub last_forward_network_ms: u64,
 }
 
 fn ids_to_tensor(ids: &[i64]) -> Tensor {
@@ -103,11 +107,13 @@ impl Stage {
                 continue;
             }
 
+            let hop_start = std::time::Instant::now();
             let attempt = match &mut self.replicas[idx] {
                 Replica::Local { worker, .. } => {
                     worker
                         .run_slice(model_id, start, end, session_id, 0, input.clone(), use_cache)
                         .await
+                        .map(|t| (t, 0u64))
                 }
                 Replica::Remote {
                     compute_endpoint,
@@ -127,9 +133,18 @@ impl Stage {
                     .await
                 }
             };
-
             match attempt {
-                Ok(out) => return Ok(out),
+                Ok((out, compute_ms)) => {
+                    let hop_ms = hop_start.elapsed().as_millis() as u64;
+                    let network_ms = hop_ms.saturating_sub(compute_ms);
+                    tracing::debug!(
+                        "hop {}:{} total {}ms = compute {}ms + network/crypto {}ms",
+                        start, end, hop_ms, compute_ms, network_ms
+                    );
+                    self.last_compute_ms = compute_ms;
+                    self.last_network_ms = network_ms;
+                    return Ok(out);
+                }
                 Err(e) => {
                     tracing::warn!(
                         "replica {} for slice {}:{} failed ({}), marking dead, trying next",
@@ -260,11 +275,17 @@ impl Orchestrator {
         let session_kx = std::mem::replace(&mut self.session_kx, KeyExchange::generate());
         let result = async {
             let mut t = tensor.clone();
+            let mut compute_sum = 0u64;
+            let mut network_sum = 0u64;
             for stage in self.stages.iter_mut() {
                 t = stage
                     .run_with_failover(&model_id, session_id, t, use_cache, &session_kx)
                     .await?;
+                compute_sum += stage.last_compute_ms;
+                network_sum += stage.last_network_ms;
             }
+            self.last_forward_compute_ms = compute_sum;
+            self.last_forward_network_ms = network_sum;
             Ok::<Tensor, anyhow::Error>(t)
         }
         .await;
@@ -280,17 +301,31 @@ impl Orchestrator {
         session_id: &str,
         eos_id: Option<i64>,
     ) -> anyhow::Result<Vec<i64>> {
+        let gen_start = std::time::Instant::now();
         let mut ids = prompt_ids.to_vec();
 
+        let prefill_start = std::time::Instant::now();
         let logits = self.forward(&ids, session_id, true).await?;
+        let prefill_ms = prefill_start.elapsed().as_millis();
+
         let mut next = argmax_last_token(&logits)?;
         ids.push(next);
         if Some(next) == eos_id {
             return Ok(ids);
         }
 
+        let mut decode_total = std::time::Duration::ZERO;
+        let mut compute_total = 0u64;
+        let mut network_total = 0u64;
+        let mut token_count = 0usize;
         for step in 1..max_new_tokens {
+            let tok_start = std::time::Instant::now();
             let logits = self.forward(&[next], session_id, true).await?;
+            decode_total += tok_start.elapsed();
+            compute_total += self.last_forward_compute_ms;
+            network_total += self.last_forward_network_ms;
+            token_count += 1;
+
             next = argmax_last_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
@@ -300,6 +335,20 @@ impl Orchestrator {
                 tracing::info!("step {}, live replicas per stage: {:?}", step, self.coverage());
             }
         }
+
+        let total_ms = gen_start.elapsed().as_millis();
+        let n = token_count.max(1) as u128;
+        tracing::info!(
+            "generation: {} tokens in {}ms | prefill {}ms | decode avg {}ms/token = compute {}ms + network/crypto {}ms | {} stages",
+            token_count + 1,
+            total_ms,
+            prefill_ms,
+            decode_total.as_millis() / n,
+            compute_total as u128 / n,
+            network_total as u128 / n,
+            self.stages.len()
+        );
+
         Ok(ids)
     }
 
@@ -427,6 +476,8 @@ pub async fn build_from_registry(
             start_layer: start,
             end_layer: end,
             replicas,
+            last_compute_ms: 0,
+            last_network_ms: 0,
         });
     }
 
@@ -436,6 +487,8 @@ pub async fn build_from_registry(
         spare_endpoints,
         target_replication,
         session_kx: KeyExchange::generate(),
+        last_forward_compute_ms: 0,
+        last_forward_network_ms: 0,
     })
 }
 

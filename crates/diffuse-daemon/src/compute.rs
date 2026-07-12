@@ -75,6 +75,7 @@ impl Compute for ComputeService {
         let tensor = bytes_to_tensor(&plain)
             .map_err(|e| Status::internal(format!("bad tensor: {}", e)))?;
 
+        let compute_start = std::time::Instant::now();
         let out = {
             let mut w = self.worker.lock().await;
             w.run_slice(
@@ -89,6 +90,7 @@ impl Compute for ComputeService {
             .await
             .map_err(|e| Status::internal(format!("worker failed: {}", e)))?
         };
+        let compute_ms = compute_start.elapsed().as_millis() as u64;
 
         let out_bytes = tensor_to_bytes(&out);
         let encrypted = encrypt(&secret, &out_bytes)
@@ -98,6 +100,7 @@ impl Compute for ComputeService {
             encrypted_activations: encrypted,
             ok: true,
             error: String::new(),
+            compute_ms,
         }))
     }
 }
@@ -111,7 +114,7 @@ pub async fn request_slice(
     end: u32,
     session_id: &str,
     activations: &Tensor,
-) -> anyhow::Result<Tensor> {
+) -> anyhow::Result<(Tensor, u64)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
@@ -135,9 +138,9 @@ pub async fn request_slice(
     if !response.ok {
         anyhow::bail!("remote compute failed: {}", response.error);
     }
-
     let plain_out = decrypt(&secret, &response.encrypted_activations)?;
-    bytes_to_tensor(&plain_out)
+    let tensor = bytes_to_tensor(&plain_out)?;
+    Ok((tensor, response.compute_ms))
 }
 
 pub fn spawn_compute_server(
