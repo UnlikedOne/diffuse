@@ -584,26 +584,94 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
             }
         };
 
-        let spinner = start_spinner("thinking");
-        let out = orch.generate(&ids, 512, &session, Some(eos)).await;
-        spinner.finish_and_clear();
+        println!();
+        print!("  ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+
+        let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+
+        let mut interrupted = false;
+        let out: anyhow::Result<Vec<i64>> = {
+            let gen_fut = orch.generate_streaming(
+                &ids,
+                4096,
+                &session,
+                Some(eos),
+                move |tid| {
+                    let _ = tok_tx.send(tid);
+                },
+            );
+
+            let mut printed = String::new();
+            let mut collected: Vec<i64> = Vec::new();
+
+            tokio::pin!(gen_fut);
+            let result: anyhow::Result<Vec<i64>> = loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        interrupted = true;
+                        break Ok(collected.clone());
+                    }
+                    maybe_tid = tok_rx.recv() => {
+                        if let Some(tid) = maybe_tid {
+                            if tid == eos {
+                                continue;
+                            }
+                            collected.push(tid);
+                            if let Ok(text) = tokenizer_worker.decode(&collected, true).await {
+                                if text.len() > printed.len() && text.starts_with(&printed) {
+                                    let delta = text[printed.len()..].to_string();
+                                    print!("{}", delta.truecolor(245, 220, 130));
+                                    let _ = std::io::stdout().flush();
+                                    printed = text;
+                                }
+                            }
+                        }
+                    }
+                    res = &mut gen_fut => {
+                        while let Ok(tid) = tok_rx.try_recv() {
+                            if tid == eos {
+                                continue;
+                            }
+                            collected.push(tid);
+                        }
+                        if let Ok(text) = tokenizer_worker.decode(&collected, true).await {
+                            if text.len() > printed.len() && text.starts_with(&printed) {
+                                let delta = text[printed.len()..].to_string();
+                                print!("{}", delta.truecolor(245, 220, 130));
+                                let _ = std::io::stdout().flush();
+                            }
+                        }
+                        break res;
+                    }
+                }
+            };
+            result
+        };
+
+        if interrupted {
+            println!();
+            println!("  {}", "[interrupted]".truecolor(150, 150, 160));
+        }
 
         let out = match out {
             Ok(o) => o,
             Err(e) => {
+                println!();
                 println!("  {} {}", "network error:".truecolor(220, 120, 120), e);
                 continue;
             }
         };
 
-        let answer = tokenizer_worker
-            .decode(&out[ids.len()..], true)
-            .await
-            .unwrap_or_default();
-
-        println!();
-        print!("  ");
-        stream_print(answer.trim());
+        let answer = if out.len() > ids.len() {
+            tokenizer_worker
+                .decode(&out[ids.len()..], true)
+                .await
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         println!();
         println!();
         println!();
