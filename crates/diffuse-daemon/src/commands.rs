@@ -201,7 +201,8 @@ pub async fn host(
     let identity_kx = Arc::new(identity.key_exchange);
     let addr: std::net::SocketAddr = listen.parse()?;
 
-    spawn_gossip_server(addr, Arc::clone(&registry));
+    let relay_state = crate::relay::RelayState::new();
+    spawn_gossip_server(addr, Arc::clone(&registry), relay_state.clone());
     crate::gossip::spawn_prune_loop(
         Arc::clone(&registry),
         std::time::Duration::from_secs(30),
@@ -210,7 +211,12 @@ pub async fn host(
     let compute_port = addr.port() + 1000;
     let compute_addr: std::net::SocketAddr =
         format!("{}:{}", addr.ip(), compute_port).parse()?;
-    spawn_compute_server(compute_addr, identity_kx, shared_worker, model.to_string());
+    spawn_compute_server(
+        compute_addr,
+        Arc::clone(&identity_kx),
+        Arc::clone(&shared_worker),
+        model.to_string(),
+    );
 
     let announce_ip = announce_addr.split(':').next().unwrap_or("127.0.0.1");
     let compute_endpoint = format!("http://{}:{}", announce_ip, compute_port);
@@ -242,6 +248,19 @@ pub async fn host(
         println!("  {} this node is reachable (can serve directly)", "✓".bright_green());
     } else {
         println!("  {} this node is behind NAT (not directly reachable)", "⚠".bright_yellow());
+        if let Some(sentinel) = sentinels
+            .iter()
+            .find(|s| s.as_str() != daemon_endpoint)
+            .cloned()
+        {
+            crate::relay::spawn_relay_client(
+                sentinel,
+                self_node_id.clone(),
+                Arc::clone(&identity_kx),
+                Arc::clone(&shared_worker),
+            );
+            println!("  {} relaying compute through sentinel (NAT mode)", "✓".bright_green());
+        }
     }
 
     let mut self_peer = Peer {
@@ -292,7 +311,7 @@ pub async fn host(
                 last_seen_ms: now_ms(),
                 signature: Vec::new(),
                 kx_public: self_kx_public.clone(),
-                reachable: false,
+                reachable: self_reachable,
             };
             fresh.signature = sign(&signing_key, &fresh.signable_bytes());
             reg.upsert(fresh);
@@ -400,7 +419,7 @@ pub async fn query(
     println!("  {} building encrypted route...", "→".bright_blue());
     let mut orch = {
         let reg = registry.lock().await;
-        crate::orchestrator::build_from_registry(model, &reg, 2, Vec::new()).await?
+        crate::orchestrator::build_from_registry(model, &reg, 2, Vec::new(), sentinels.first().cloned()).await?
     };
 
     // Encode locally (tokens stay here).
@@ -509,9 +528,10 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
     let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
     tokenizer_worker.load_slice(&model, 0, 0, "").await?;
 
+    let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
     let mut orch = {
         let reg = registry.lock().await;
-        crate::orchestrator::build_from_registry(&model, &reg, 2, Vec::new()).await?
+        crate::orchestrator::build_from_registry(&model, &reg, 2, Vec::new(), sentinels.first().cloned()).await?
     };
 
     let mut history: Vec<(String, String)> = Vec::new();

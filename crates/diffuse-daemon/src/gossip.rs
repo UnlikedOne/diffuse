@@ -146,14 +146,21 @@ pub async fn gossip_with(
 pub fn spawn_gossip_server(
     listen_addr: std::net::SocketAddr,
     registry: Arc<Mutex<PeerRegistry>>,
+    relay_state: crate::relay::RelayState,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let service = GossipService { registry };
+        let gossip_service = GossipService { registry };
+        let relay_service = crate::relay::RelayService { state: relay_state };
         let server = tonic::transport::Server::builder()
-            .add_service(pb::gossip_server::GossipServer::new(service))
+            .add_service(pb::gossip_server::GossipServer::new(gossip_service))
+            .add_service(
+                crate::relay::pb::relay_server::RelayServer::new(relay_service)
+                    .max_decoding_message_size(128 * 1024 * 1024)
+                    .max_encoding_message_size(128 * 1024 * 1024),
+            )
             .serve(listen_addr);
         if let Err(e) = server.await {
-            tracing::error!("gossip server error: {}", e);
+            tracing::error!("gossip/relay server error: {}", e);
         }
     })
 }

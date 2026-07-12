@@ -30,6 +30,7 @@ hex = "0.4"
 owo-colors = "4"
 inquire = "0.7"
 indicatif = "0.17"
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = "0.12"

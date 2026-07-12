@@ -49,6 +49,13 @@ fn bytes_to_tensor(b: &[u8]) -> anyhow::Result<Tensor> {
     Ok(Tensor { shape, dtype, data })
 }
 
+pub fn tensor_to_bytes_pub(t: &Tensor) -> Vec<u8> {
+    tensor_to_bytes(t)
+}
+pub fn bytes_to_tensor_pub(b: &[u8]) -> anyhow::Result<Tensor> {
+    bytes_to_tensor(b)
+}
+
 pub struct ComputeService {
     pub identity_kx: Arc<KeyExchange>,
     pub worker: Arc<Mutex<WorkerHandle>>,
@@ -62,46 +69,10 @@ impl Compute for ComputeService {
         request: Request<ComputeRequest>,
     ) -> Result<Response<ComputeResponse>, Status> {
         let req = request.into_inner();
-
-        let peer_kx: [u8; 32] = req
-            .requester_kx_public
-            .as_slice()
-            .try_into()
-            .map_err(|_| Status::invalid_argument("bad kx public key"))?;
-        let secret = self.identity_kx.shared_secret(&peer_kx);
-
-        let plain = decrypt(&secret, &req.encrypted_activations)
-            .map_err(|e| Status::invalid_argument(format!("decrypt failed: {}", e)))?;
-        let tensor = bytes_to_tensor(&plain)
-            .map_err(|e| Status::internal(format!("bad tensor: {}", e)))?;
-
-        let compute_start = std::time::Instant::now();
-        let out = {
-            let mut w = self.worker.lock().await;
-            w.run_slice(
-                &req.model_id,
-                req.start_layer,
-                req.end_layer,
-                &req.session_id,
-                0,
-                tensor,
-                true,
-            )
+        let resp = process_compute_request(&self.identity_kx, &self.worker, &req)
             .await
-            .map_err(|e| Status::internal(format!("worker failed: {}", e)))?
-        };
-        let compute_ms = compute_start.elapsed().as_millis() as u64;
-
-        let out_bytes = tensor_to_bytes(&out);
-        let encrypted = encrypt(&secret, &out_bytes)
-            .map_err(|e| Status::internal(format!("encrypt failed: {}", e)))?;
-
-        Ok(Response::new(ComputeResponse {
-            encrypted_activations: encrypted,
-            ok: true,
-            error: String::new(),
-            compute_ms,
-        }))
+            .map_err(|e| Status::internal(format!("compute failed: {}", e)))?;
+        Ok(Response::new(resp))
     }
 }
 
@@ -169,5 +140,43 @@ pub fn spawn_compute_server(
         if let Err(e) = server.await {
             tracing::error!("compute server error: {}", e);
         }
+    })
+}
+
+pub async fn process_compute_request(
+    identity_kx: &KeyExchange,
+    worker: &Arc<Mutex<WorkerHandle>>,
+    req: &ComputeRequest,
+) -> anyhow::Result<ComputeResponse> {
+    let peer_kx: [u8; 32] = req
+        .requester_kx_public
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("bad kx public key"))?;
+    let secret = identity_kx.shared_secret(&peer_kx);
+    let plain = decrypt(&secret, &req.encrypted_activations)?;
+    let tensor = bytes_to_tensor(&plain)?;
+    let compute_start = std::time::Instant::now();
+    let out = {
+        let mut w = worker.lock().await;
+        w.run_slice(
+            &req.model_id,
+            req.start_layer,
+            req.end_layer,
+            &req.session_id,
+            0,
+            tensor,
+            true,
+        )
+        .await?
+    };
+    let compute_ms = compute_start.elapsed().as_millis() as u64;
+    let out_bytes = tensor_to_bytes(&out);
+    let encrypted = encrypt(&secret, &out_bytes)?;
+    Ok(ComputeResponse {
+        encrypted_activations: encrypted,
+        ok: true,
+        error: String::new(),
+        compute_ms,
     })
 }

@@ -21,3 +21,24 @@ message ComputeResponse {
 service Compute {
   rpc RunSlice(ComputeRequest) returns (ComputeResponse);
 }
+
+message RelayEnvelope {
+  string request_id = 1;
+  ComputeRequest request = 2;
+}
+
+message RelayReply {
+  string request_id = 1;
+  ComputeResponse response = 2;
+  bytes node_id = 3;
+}
+
+message RelayComputeRequest {
+  bytes target_node_id = 1;
+  ComputeRequest request = 2;
+}
+
+service Relay {
+  rpc Attach(stream RelayReply) returns (stream RelayEnvelope);
+  rpc RelayCompute(RelayComputeRequest) returns (ComputeResponse);
+}
