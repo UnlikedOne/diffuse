@@ -261,9 +261,11 @@ impl Orchestrator {
         let result = async {
             let mut t = tensor.clone();
             for stage in self.stages.iter_mut() {
+                let hop_start = std::time::Instant::now();
                 t = stage
                     .run_with_failover(&model_id, session_id, t, use_cache, &session_kx)
                     .await?;
+                tracing::debug!("hop took {:?}", hop_start.elapsed());
             }
             Ok::<Tensor, anyhow::Error>(t)
         }
@@ -280,17 +282,27 @@ impl Orchestrator {
         session_id: &str,
         eos_id: Option<i64>,
     ) -> anyhow::Result<Vec<i64>> {
+        let gen_start = std::time::Instant::now();
         let mut ids = prompt_ids.to_vec();
 
+        let prefill_start = std::time::Instant::now();
         let logits = self.forward(&ids, session_id, true).await?;
+        let prefill_ms = prefill_start.elapsed().as_millis();
+
         let mut next = argmax_last_token(&logits)?;
         ids.push(next);
         if Some(next) == eos_id {
             return Ok(ids);
         }
 
+        let mut decode_total = std::time::Duration::ZERO;
+        let mut token_count = 0usize;
         for step in 1..max_new_tokens {
+            let tok_start = std::time::Instant::now();
             let logits = self.forward(&[next], session_id, true).await?;
+            decode_total += tok_start.elapsed();
+            token_count += 1;
+
             next = argmax_last_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
@@ -300,6 +312,22 @@ impl Orchestrator {
                 tracing::info!("step {}, live replicas per stage: {:?}", step, self.coverage());
             }
         }
+
+        let total_ms = gen_start.elapsed().as_millis();
+        let per_token_ms = if token_count > 0 {
+            decode_total.as_millis() / token_count as u128
+        } else {
+            0
+        };
+        tracing::info!(
+            "generation done: {} tokens in {}ms | prefill {}ms | decode avg {}ms/token | {} stages",
+            token_count + 1,
+            total_ms,
+            prefill_ms,
+            per_token_ms,
+            self.stages.len()
+        );
+
         Ok(ids)
     }
 
