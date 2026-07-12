@@ -68,7 +68,7 @@ impl ClientSession {
             )
             .await?;
 
-        let logits = request_slice(
+        let (logits, _compute_ms) = request_slice(
             &self.remote.daemon_endpoint,
             &self.remote.host_kx_public,
             &self.client_kx,

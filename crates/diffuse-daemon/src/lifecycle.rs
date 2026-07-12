@@ -24,6 +24,8 @@ async fn build_stage(
         start_layer: start,
         end_layer: end,
         replicas,
+        last_compute_ms: 0,
+        last_network_ms: 0,
     })
 }
 
@@ -56,6 +58,8 @@ pub async fn run_demo(
         spare_endpoints: spares,
         target_replication: 2,
         session_kx: KeyExchange::generate(),
+        last_forward_compute_ms: 0,
+        last_forward_network_ms: 0,
     };
 
     let control = ControlPlane::new(orch);
