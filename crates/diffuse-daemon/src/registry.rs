@@ -12,6 +12,7 @@ pub struct Peer {
     pub last_seen_ms: u64,
     pub signature: Vec<u8>,
     pub kx_public: Vec<u8>,
+    pub reachable: bool,
 }
 
 pub fn now_ms() -> u64 {

@@ -193,27 +193,14 @@ pub async fn host(
 
     let announce_addr = public_addr.as_deref().unwrap_or(listen);
     let daemon_endpoint = format!("http://{}", announce_addr);
-    let mut self_peer = Peer {
-        node_id: identity.signing_public().to_vec(),
-        daemon_endpoint: daemon_endpoint.clone(),
-        worker_endpoint: worker_endpoint.to_string(),
-        model_id: model.to_string(),
-        start_layer: assignment.start,
-        end_layer: assignment.end,
-        last_seen_ms: now_ms(),
-        signature: Vec::new(),
-        kx_public: identity.kx_public().to_vec(),
-    };
-    self_peer.signature = sign(&identity.signing_key, &self_peer.signable_bytes());
-    registry.lock().await.upsert(self_peer);
 
     let self_node_id = identity.signing_public().to_vec();
     let self_kx_public = identity.kx_public().to_vec();
     let signing_key = identity.signing_key.clone();
     let shared_worker = Arc::new(Mutex::new(worker));
     let identity_kx = Arc::new(identity.key_exchange);
-
     let addr: std::net::SocketAddr = listen.parse()?;
+
     spawn_gossip_server(addr, Arc::clone(&registry));
     crate::gossip::spawn_prune_loop(
         Arc::clone(&registry),
@@ -225,11 +212,58 @@ pub async fn host(
         format!("{}:{}", addr.ip(), compute_port).parse()?;
     spawn_compute_server(compute_addr, identity_kx, shared_worker, model.to_string());
 
+    let announce_ip = announce_addr.split(':').next().unwrap_or("127.0.0.1");
+    let compute_endpoint = format!("http://{}:{}", announce_ip, compute_port);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let self_reachable = {
+        let probes: Vec<String> = sentinels
+            .iter()
+            .filter(|s| s.as_str() != daemon_endpoint)
+            .cloned()
+            .collect();
+        if probes.is_empty() {
+            tracing::info!("no external sentinel to probe; assuming reachable (public bootstrap)");
+            true
+        } else {
+            let mut result = false;
+            for s in &probes {
+                if crate::gossip::check_my_reachability(s, &compute_endpoint).await {
+                    result = true;
+                    break;
+                }
+            }
+            result
+        }
+    };
+
+    if self_reachable {
+        println!("  {} this node is reachable (can serve directly)", "✓".bright_green());
+    } else {
+        println!("  {} this node is behind NAT (not directly reachable)", "⚠".bright_yellow());
+    }
+
+    let mut self_peer = Peer {
+        node_id: self_node_id.clone(),
+        daemon_endpoint: daemon_endpoint.clone(),
+        worker_endpoint: worker_endpoint.to_string(),
+        model_id: model.to_string(),
+        start_layer: assignment.start,
+        end_layer: assignment.end,
+        last_seen_ms: now_ms(),
+        signature: Vec::new(),
+        kx_public: self_kx_public.clone(),
+        reachable: self_reachable,
+    };
+    self_peer.signature = sign(&signing_key, &self_peer.signable_bytes());
+    registry.lock().await.upsert(self_peer);
+
     println!(
         "  {} serving — gossip {} / compute {}",
         "✓".bright_green(),
         daemon_endpoint.bright_white(),
-        format!("http://{}", compute_addr).bright_white()
+        compute_endpoint.bright_white()
     );
 
     spawn_gossip_loop(
@@ -258,6 +292,7 @@ pub async fn host(
                 last_seen_ms: now_ms(),
                 signature: Vec::new(),
                 kx_public: self_kx_public.clone(),
+                reachable: false,
             };
             fresh.signature = sign(&signing_key, &fresh.signable_bytes());
             reg.upsert(fresh);

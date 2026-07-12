@@ -11,7 +11,7 @@ use crate::registry::{Peer, PeerRegistry};
 use diffuse_trust::crypto::verify;
 use pb::gossip_client::GossipClient;
 use pb::gossip_server::Gossip;
-use pb::{GossipRequest, GossipResponse, PeerInfo};
+use pb::{GossipRequest, GossipResponse, PeerInfo, ReachabilityRequest, ReachabilityResponse};
 
 pub fn peer_to_info(p: &Peer) -> PeerInfo {
     PeerInfo {
@@ -24,6 +24,7 @@ pub fn peer_to_info(p: &Peer) -> PeerInfo {
         last_seen_ms: p.last_seen_ms,
         signature: p.signature.clone(),
         kx_public: p.kx_public.clone(),
+        reachable: p.reachable,
     }
 }
 
@@ -38,6 +39,7 @@ pub fn info_to_peer(i: &PeerInfo) -> Peer {
         last_seen_ms: i.last_seen_ms,
         signature: i.signature.clone(),
         kx_public: i.kx_public.clone(),
+        reachable: i.reachable,
     }
 }
 
@@ -86,6 +88,29 @@ impl Gossip for GossipService {
         Ok(Response::new(GossipResponse {
             known_peers: outgoing,
         }))
+    }
+
+    async fn check_reachability(
+        &self,
+        request: Request<ReachabilityRequest>,
+    ) -> Result<Response<ReachabilityResponse>, Status> {
+        let req = request.into_inner();
+        let endpoint = req.compute_endpoint;
+        let addr = endpoint
+            .strip_prefix("http://")
+            .unwrap_or(&endpoint)
+            .to_string();
+        let reachable = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => true,
+            _ => false,
+        };
+        tracing::info!("reachability check for {}: {}", addr, reachable);
+        Ok(Response::new(ReachabilityResponse { reachable }))
     }
 }
 
@@ -149,4 +174,28 @@ pub fn spawn_prune_loop(
             }
         }
     })
+}
+
+pub async fn check_my_reachability(
+    sentinel_endpoint: &str,
+    my_compute_endpoint: &str,
+) -> bool {
+    let result = async {
+        let mut client = GossipClient::connect(sentinel_endpoint.to_string()).await?;
+        let resp = client
+            .check_reachability(ReachabilityRequest {
+                compute_endpoint: my_compute_endpoint.to_string(),
+            })
+            .await?
+            .into_inner();
+        Ok::<bool, anyhow::Error>(resp.reachable)
+    }
+    .await;
+    match result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("reachability check failed: {}, assuming reachable", e);
+            true
+        }
+    }
 }

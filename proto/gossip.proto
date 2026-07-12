@@ -12,17 +12,22 @@ message PeerInfo {
   uint64 last_seen_ms = 7;
   bytes signature = 8;
   bytes kx_public = 9;
+  bool reachable = 10;
 }
-
 message GossipRequest {
   bytes from_node_id = 1;
   repeated PeerInfo known_peers = 2;
 }
-
 message GossipResponse {
   repeated PeerInfo known_peers = 1;
 }
-
+message ReachabilityRequest {
+  string compute_endpoint = 1;
+}
+message ReachabilityResponse {
+  bool reachable = 2;
+}
 service Gossip {
   rpc Exchange(GossipRequest) returns (GossipResponse);
+  rpc CheckReachability(ReachabilityRequest) returns (ReachabilityResponse);
 }
