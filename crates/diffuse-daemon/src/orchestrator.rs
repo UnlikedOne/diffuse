@@ -18,25 +18,34 @@ pub enum Replica {
         alive: bool,
         client: Option<ComputeClient<Channel>>,
     },
+    Relayed {
+        relay_endpoint: String,
+        target_node_id: Vec<u8>,
+        host_kx_public: [u8; 32],
+        label: String,
+        alive: bool,
+    },
 }
-
 impl Replica {
     pub fn is_alive(&self) -> bool {
         match self {
             Replica::Local { alive, .. } => *alive,
             Replica::Remote { alive, .. } => *alive,
+            Replica::Relayed { alive, .. } => *alive,
         }
     }
     pub fn set_dead(&mut self) {
         match self {
             Replica::Local { alive, .. } => *alive = false,
             Replica::Remote { alive, .. } => *alive = false,
+            Replica::Relayed { alive, .. } => *alive = false,
         }
     }
     pub fn label(&self) -> String {
         match self {
             Replica::Local { worker, .. } => worker.endpoint.clone(),
             Replica::Remote { label, .. } => label.clone(),
+            Replica::Relayed { label, .. } => label.clone(),
         }
     }
 }
@@ -139,7 +148,6 @@ impl Stage {
                             .await
                         }
                         None => {
-                            // reconnect once if we never connected
                             match crate::compute::connect_compute(compute_endpoint).await {
                                 Ok(mut c) => {
                                     let r = request_slice(
@@ -155,7 +163,27 @@ impl Stage {
                         }
                     }
                 }
+                Replica::Relayed {
+                    relay_endpoint,
+                    target_node_id,
+                    host_kx_public,
+                    ..
+                } => {
+                    crate::relay::relay_compute(
+                        relay_endpoint,
+                        target_node_id,
+                        host_kx_public,
+                        session_kx,
+                        model_id,
+                        start,
+                        end,
+                        session_id,
+                        &input,
+                    )
+                    .await
+                }
             };
+
             match attempt {
                 Ok((out, compute_ms)) => {
                     let hop_ms = hop_start.elapsed().as_millis() as u64;
@@ -180,6 +208,7 @@ impl Stage {
                 }
             }
         }
+
         anyhow::bail!("all replicas dead for slice {}:{}", start, end)
     }
 
@@ -210,6 +239,7 @@ impl Orchestrator {
                         *alive = ok;
                     }
                     Replica::Remote { .. } => {}
+                    Replica::Relayed { .. } => {}
                 }
             }
         }
@@ -452,6 +482,7 @@ pub async fn build_from_registry(
     registry: &PeerRegistry,
     target_replication: usize,
     spare_endpoints: Vec<String>,
+    relay_sentinel: Option<String>,
 ) -> anyhow::Result<Orchestrator> {
     let mut slices: Vec<(u32, u32)> = registry
         .all()
@@ -461,11 +492,9 @@ pub async fn build_from_registry(
         .collect();
     slices.sort();
     slices.dedup();
-
     if slices.is_empty() {
         anyhow::bail!("no peers in registry serve model {}", model_id);
     }
-
     let mut stages = Vec::new();
     for (start, end) in slices {
         let peers: Vec<Peer> = registry.replicas_for_slice(model_id, start, end);
@@ -478,27 +507,56 @@ pub async fn build_from_registry(
                     continue;
                 }
             };
-            let compute_endpoint = daemon_to_compute_endpoint(&peer.daemon_endpoint);
-            tracing::info!(
-                "route: encrypted replica {} for slice {}:{}",
-                compute_endpoint,
-                start,
-                end
-            );
-            let client = match crate::compute::connect_compute(&compute_endpoint).await {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::warn!("could not pre-connect to {}: {}", compute_endpoint, e);
-                    None
+
+            if peer.reachable {
+                let compute_endpoint = daemon_to_compute_endpoint(&peer.daemon_endpoint);
+                tracing::info!(
+                    "route: direct encrypted replica {} for slice {}:{}",
+                    compute_endpoint,
+                    start,
+                    end
+                );
+                let client = match crate::compute::connect_compute(&compute_endpoint).await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::warn!("could not pre-connect to {}: {}", compute_endpoint, e);
+                        None
+                    }
+                };
+                replicas.push(Replica::Remote {
+                    compute_endpoint,
+                    host_kx_public: kx,
+                    label: peer.daemon_endpoint.clone(),
+                    alive: true,
+                    client,
+                });
+            } else {
+                match &relay_sentinel {
+                    Some(relay) => {
+                        tracing::info!(
+                            "route: relayed replica {} via {} for slice {}:{}",
+                            peer.daemon_endpoint,
+                            relay,
+                            start,
+                            end
+                        );
+                        replicas.push(Replica::Relayed {
+                            relay_endpoint: relay.clone(),
+                            target_node_id: peer.node_id.clone(),
+                            host_kx_public: kx,
+                            label: format!("{} (relayed)", peer.daemon_endpoint),
+                            alive: true,
+                        });
+                    }
+                    None => {
+                        tracing::warn!(
+                            "route: peer {} is behind NAT but no relay sentinel is known, skipping",
+                            peer.daemon_endpoint
+                        );
+                        continue;
+                    }
                 }
-            };
-            replicas.push(Replica::Remote {
-                compute_endpoint,
-                host_kx_public: kx,
-                label: peer.daemon_endpoint.clone(),
-                alive: true,
-                client,
-            });
+            }
         }
         if replicas.is_empty() {
             anyhow::bail!("no reachable replica for slice {}:{}", start, end);
@@ -511,7 +569,6 @@ pub async fn build_from_registry(
             last_network_ms: 0,
         });
     }
-
     Ok(Orchestrator {
         model_id: model_id.to_string(),
         stages,
