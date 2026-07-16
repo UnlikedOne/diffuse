@@ -4,14 +4,16 @@
 
 # Diffuse
 
+<img src="assets/diffuse-chat.png" alt="Diffuse chat" width="720">
+
 ### Your own AI. Split across the world. Watched by no one.
 
 Large language models running on a peer-to-peer network of ordinary machines.
 Your prompt never leaves your device in clear text.
 
-<code>no servers</code> · <code>no surveillance</code> · <code>no logs</code>
+<code>no servers</code> · <code>no surveillance</code> · <code>no prompt logging</code>
 
-[Install](#install) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Architecture](#architecture) · [Threat model](#honest-limits) · [Contributing](#contribute-your-machine)
+[Install](#install) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Architecture](#architecture) · [Threat model](#honest-limits) · [Documentation](https://unlikedone.github.io/diffuse/)
 
 </div>
 
