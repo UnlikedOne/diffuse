@@ -159,7 +159,7 @@ def _rebuild_meta_buffers(model, cfg):
             continue
         for bname, buf in rebuilt.named_buffers(recurse=False):
             if bname in stale and buf.device.type != "meta":
-                module.register_buffer(bname, buf.to(torch.float32), persistent=False)
+                module.register_buffer(bname, buf, persistent=False)
 
 
 class ModelSlice:
@@ -276,7 +276,7 @@ class ModelSlice:
             with safe_open(path, framework="pt", device="cpu") as f:
                 for name in tensor_names:
                     key = _remap_key(name, start_layer)
-                    state[key] = f.get_tensor(name).to(torch.float32)
+                    state[key] = f.get_tensor(name)
 
         model.load_state_dict(state, strict=False, assign=True)
 
@@ -321,7 +321,7 @@ class ModelSlice:
             model_id,
             token=hf_token,
             cache_dir=cache_dir,
-            dtype=torch.float32,
+            dtype="auto",
         )
         model.eval()
         parts = _resolve_backbone(model)

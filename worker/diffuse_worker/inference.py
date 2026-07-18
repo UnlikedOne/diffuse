@@ -37,6 +37,10 @@ class SliceRunner:
         return self.slice.rotary(hidden, position_ids)
 
     def _run_layers(self, hidden, cache, start_pos):
+        if self.slice.layers is not None and len(self.slice.layers) > 0:
+            target = next(self.slice.layers[0].parameters()).dtype
+            if hidden.dtype != target:
+                hidden = hidden.to(target)
         pos_emb = self._position_embeddings(hidden, start_pos)
         seq_len = hidden.shape[1]
         params = self._layer_params

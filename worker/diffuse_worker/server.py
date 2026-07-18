@@ -17,13 +17,14 @@ MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 
 
 def tensor_to_proto(t: torch.Tensor) -> data_pb2.Tensor:
-    arr = t.cpu().numpy()
+    if t.dtype in (torch.bfloat16, torch.float16):
+        t = t.to(torch.float32)
+    arr = t.detach().cpu().numpy()
     return data_pb2.Tensor(
         shape=list(arr.shape),
         dtype=str(arr.dtype),
         data=arr.tobytes(),
     )
-
 
 def proto_to_tensor(p: data_pb2.Tensor) -> torch.Tensor:
     np_dtype = np.dtype(p.dtype)
@@ -44,7 +45,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 model_id=request.model_id,
                 start_layer=request.start_layer,
                 end_layer=request.end_layer,
-                hf_token=request.hf_token or self.config.hf_token,
+                hf_token=request.hf_token or self.config.hf_token or None,
                 cache_dir=self.config.cache_dir,
             )
             self.runner = SliceRunner(self.slice)
@@ -137,7 +138,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             plan = plan_capacity(
                 request.model_id,
                 overhead_fraction=overhead,
-                load_dtype="float32",
+                load_dtype="bfloat16",
                 hf_token=request.hf_token or self.config.hf_token or None,
             )
             return data_pb2.ProfileResponse(
