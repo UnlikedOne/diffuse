@@ -196,7 +196,7 @@ pub async fn host(
     let addr: std::net::SocketAddr = listen.parse()?;
     let compute_port = addr.port() + 1000;
 
-    let relay_state = crate::relay::RelayState::new();
+    let relay_state = crate::relay::RelayState::with_registry(Arc::clone(&registry));
     spawn_gossip_server(addr, Arc::clone(&registry), relay_state.clone());
     crate::gossip::spawn_prune_loop(Arc::clone(&registry), std::time::Duration::from_secs(30));
 
@@ -312,29 +312,40 @@ pub async fn host(
     println!("  {} node is live. Press Ctrl+C to leave.", "●".bright_green());
     println!();
 
+    let mut ticker = tokio::time::interval(Duration::from_secs(10));
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        {
-            let mut reg = registry.lock().await;
-            let mut fresh = Peer {
-                node_id: self_node_id.clone(),
-                daemon_endpoint: daemon_endpoint.clone(),
-                worker_endpoint: worker_endpoint.to_string(),
-                model_id: model.to_string(),
-                start_layer: assignment.start,
-                end_layer: assignment.end,
-                last_seen_ms: now_ms(),
-                signature: Vec::new(),
-                kx_public: self_kx_public.clone(),
-                reachable: self_reachable,
-            };
-            fresh.signature = sign(&signing_key, &fresh.signable_bytes());
-            reg.upsert(fresh);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                println!("  {} leaving the network", "◆".bright_yellow());
+                break;
+            }
+            _ = ticker.tick() => {
+                {
+                    let mut reg = registry.lock().await;
+                    let mut fresh = Peer {
+                        node_id: self_node_id.clone(),
+                        daemon_endpoint: daemon_endpoint.clone(),
+                        worker_endpoint: worker_endpoint.to_string(),
+                        model_id: model.to_string(),
+                        start_layer: assignment.start,
+                        end_layer: assignment.end,
+                        last_seen_ms: now_ms(),
+                        signature: Vec::new(),
+                        kx_public: self_kx_public.clone(),
+                        reachable: self_reachable,
+                    };
+                    fresh.signature = sign(&signing_key, &fresh.signable_bytes());
+                    reg.upsert(fresh);
+                }
+                let caps = { analyze(&*registry.lock().await) };
+                let n = registry.lock().await.len();
+                crate::display::render_network_state(&caps, n, 2);
+            }
         }
-        let caps = { analyze(&*registry.lock().await) };
-        let n = registry.lock().await.len();
-        crate::display::render_network_state(&caps, n, 2);
     }
+
+    Ok(())
 }
 
 fn find_worker_dir() -> anyhow::Result<String> {
@@ -361,7 +372,26 @@ fn find_worker_dir() -> anyhow::Result<String> {
     )
 }
 
-fn spawn_local_worker(port: u16) -> anyhow::Result<std::process::Child> {
+pub struct WorkerGuard {
+    child: std::process::Child,
+}
+
+impl WorkerGuard {
+    pub fn new(child: std::process::Child) -> Self {
+        Self { child }
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        let pid = self.child.id();
+        tracing::info!("stopping local worker (pid {})", pid);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
     let worker_dir = find_worker_dir()?;
     let python = format!("{}/.venv/bin/python", worker_dir);
     let child = std::process::Command::new(python)
@@ -372,7 +402,7 @@ fn spawn_local_worker(port: u16) -> anyhow::Result<std::process::Child> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    Ok(child)
+    Ok(WorkerGuard::new(child))
 }
 
 pub async fn query(

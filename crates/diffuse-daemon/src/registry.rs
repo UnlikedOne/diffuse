@@ -109,6 +109,10 @@ impl PeerRegistry {
             .cloned()
             .collect()
     }
+
+    pub fn remove_node(&mut self, node_id: &[u8]) -> bool {
+        self.peers.remove(node_id).is_some()
+    }
 }
 
 impl Peer {

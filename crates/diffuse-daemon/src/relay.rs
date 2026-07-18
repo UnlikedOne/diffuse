@@ -20,11 +20,20 @@ type NodeId = Vec<u8>;
 pub struct RelayState {
     registrations: Arc<Mutex<HashMap<NodeId, mpsc::Sender<RelayEnvelope>>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ComputeResponse>>>>,
+    registry: Option<Arc<Mutex<crate::registry::PeerRegistry>>>,
 }
 
 impl RelayState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_registry(registry: Arc<Mutex<crate::registry::PeerRegistry>>) -> Self {
+        Self {
+            registrations: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            registry: Some(registry),
+        }
     }
 }
 
@@ -64,6 +73,7 @@ impl Relay for RelayService {
 
         let pending = self.state.pending.clone();
         let registrations = self.state.registrations.clone();
+        let registry = self.state.registry.clone();
         let node_id_for_replies = node_id.clone();
         tokio::spawn(async move {
             while let Some(msg) = inbound.next().await {
@@ -92,8 +102,22 @@ impl Relay for RelayService {
                     }
                 }
             }
-            let mut regs = registrations.lock().await;
-            regs.remove(&node_id_for_replies);
+            {
+                let mut regs = registrations.lock().await;
+                regs.remove(&node_id_for_replies);
+            }
+            if let Some(reg) = registry {
+                let evicted = {
+                    let mut r = reg.lock().await;
+                    r.remove_node(&node_id_for_replies)
+                };
+                if evicted {
+                    tracing::info!(
+                        "relay: evicted node {} from registry on detach",
+                        hex_short(&node_id_for_replies)
+                    );
+                }
+            }
             tracing::info!("relay: node {} detached", hex_short(&node_id_for_replies));
         });
 
