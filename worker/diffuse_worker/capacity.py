@@ -9,7 +9,7 @@ _DTYPE_BYTES = {
     "F8_E4M3": 1, "F8_E5M2": 1,
 }
 
-_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+_LAYER_RE = re.compile(r"\.(?:layers|h|blocks|block|decoder\.layers)\.(\d+)\.")
 
 
 def _normalize_dtype(d: str) -> str:
