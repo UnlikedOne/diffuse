@@ -4,66 +4,68 @@ site_url: https://unlikedone.github.io/diffuse/
 repo_url: https://github.com/UnlikedOne/diffuse
 repo_name: UnlikedOne/diffuse
 edit_uri: edit/main/docs/
-copyright: AGPL-3.0
+copyright: AGPL-3.0-or-later
 
 theme:
   name: material
+  custom_dir: overrides
   language: en
   palette:
-    - media: "(prefers-color-scheme)"
-      toggle:
-        icon: material/brightness-auto
-        name: Switch to light mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: teal
-      accent: cyan
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: teal
-      accent: cyan
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
+    - scheme: diffuse-dark
   font:
     text: Inter
     code: JetBrains Mono
   features:
     - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.sections
     - navigation.top
     - navigation.footer
+    - navigation.indexes
     - content.code.copy
     - content.code.annotate
     - toc.follow
     - search.suggest
     - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/extra.css
 
 nav:
   - Home: index.md
-  - Architecture: ARCHITECTURE.md
-  - Privacy: PRIVACY.md
-  - CLI: CLI.md
-  - Benchmarks: BENCHMARKS.md
-  - NAT relay design: nat-relay-design.md
+  - Start:
+      - Overview: ARCHITECTURE.md
+      - CLI reference: CLI.md
+  - Understand:
+      - Privacy model: PRIVACY.md
+      - NAT relay design: nat-relay-design.md
+  - Operate:
+      - Benchmarks: BENCHMARKS.md
 
 markdown_extensions:
   - admonition
   - attr_list
   - md_in_html
   - tables
+  - footnotes
   - toc:
       permalink: true
+      permalink_title: Link to this section
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
   - pymdownx.superfences
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -74,3 +76,5 @@ extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/UnlikedOne/diffuse
+      name: Diffuse on GitHub
+  generator: false

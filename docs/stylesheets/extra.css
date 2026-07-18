@@ -1,0 +1,289 @@
+/* ============================================================
+   Diffuse documentation theme
+   Pure ink, restrained type, one accent used sparingly.
+   ============================================================ */
+
+@import url("https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500;700&family=Ubuntu+Mono:wght@400;700&display=swap");
+
+[data-md-color-scheme="diffuse-dark"] {
+  --ink-900: #07090C;
+  --ink-800: #0C1015;
+  --ink-700: #11161D;
+  --line: #1C232C;
+  --line-soft: #141A21;
+
+  --text: #ECEFF2;
+  --text-dim: #8E9AA8;
+  --text-faint: #5C6775;
+
+  --signal-1: #5EEAD4;
+  --signal-2: #38BDF8;
+
+  --md-default-bg-color: var(--ink-900);
+  --md-default-fg-color: var(--text);
+  --md-default-fg-color--light: var(--text-dim);
+  --md-default-fg-color--lighter: var(--text-faint);
+  --md-default-fg-color--lightest: var(--line);
+
+  --md-primary-fg-color: var(--ink-900);
+  --md-primary-bg-color: var(--text);
+  --md-accent-fg-color: var(--signal-1);
+
+  --md-typeset-color: var(--text);
+  --md-typeset-a-color: var(--signal-2);
+
+  --md-code-bg-color: var(--ink-700);
+  --md-code-fg-color: #C7D2E0;
+
+  --md-footer-bg-color: var(--ink-800);
+  --md-footer-bg-color--dark: var(--ink-900);
+
+  --md-text-font: "Ubuntu";
+  --md-code-font: "Ubuntu Mono";
+
+  color-scheme: dark;
+}
+
+body {
+  background: var(--ink-900);
+  font-family: "Ubuntu", system-ui, sans-serif;
+}
+
+.md-typeset {
+  font-size: 0.8rem;
+  line-height: 1.74;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  font-family: "Ubuntu", system-ui, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-size: 1.9rem;
+}
+
+.md-typeset h2 {
+  margin-top: 2.6em;
+  padding-top: 1.5em;
+  border-top: 1px solid var(--line-soft);
+}
+
+.md-typeset h1::after {
+  content: "";
+  display: block;
+  width: 3rem;
+  height: 2px;
+  margin-top: 0.75rem;
+  background: var(--signal-1);
+  border-radius: 2px;
+  opacity: 0.8;
+}
+
+/* ---- header ---- */
+
+.md-header {
+  background: rgba(7, 9, 12, 0.86);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line-soft);
+  box-shadow: none;
+}
+
+.md-header__title {
+  font-family: "Ubuntu", sans-serif;
+  font-weight: 500;
+}
+
+.md-tabs { background: transparent; }
+
+/* ---- links ---- */
+
+.md-typeset a {
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.md-typeset a:hover {
+  color: var(--signal-1);
+  border-bottom-color: var(--signal-1);
+}
+
+/* ---- code ---- */
+
+.md-typeset code {
+  background: var(--ink-700);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  font-size: 0.85em;
+}
+
+.md-typeset pre > code {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+/* ---- tables ---- */
+
+.md-typeset table:not([class]) {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 0.74rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--ink-700);
+  font-weight: 500;
+  color: var(--text);
+  border: none;
+}
+
+.md-typeset table:not([class]) td { border-top: 1px solid var(--line-soft); }
+.md-typeset table:not([class]) tr:hover { background: var(--ink-800); }
+
+/* ---- admonitions ---- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  border-left-width: 3px;
+  background: var(--ink-800);
+  font-size: 0.76rem;
+}
+
+/* ============================================================
+   HOME
+   Centered, quiet, almost empty. Black stays black.
+   ============================================================ */
+
+.dx-home {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2rem 1.5rem;
+  background: var(--ink-900);
+}
+
+.dx-home__eyebrow {
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0 0 1.6rem;
+}
+
+.dx-home__title {
+  font-family: "Ubuntu", sans-serif;
+  font-weight: 300;
+  font-size: 3.4rem;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  margin: 0 0 1.6rem;
+  max-width: 20ch;
+}
+
+.dx-home__title em {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--signal-1);
+}
+
+.dx-home__lede {
+  font-size: 0.95rem;
+  font-weight: 300;
+  line-height: 1.7;
+  color: var(--text-dim);
+  max-width: 50ch;
+  margin: 0 0 3rem;
+}
+
+.dx-home__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  justify-content: center;
+}
+
+.dx-btn {
+  display: inline-flex;
+  align-items: center;
+  font-family: "Ubuntu", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 0.54rem 1.2rem;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  text-decoration: none;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.dx-btn--primary,
+.dx-btn--primary:visited {
+  background: var(--signal-1);
+  color: #04121B;
+  border-color: var(--signal-1);
+}
+
+.dx-btn--primary:hover {
+  background: transparent;
+  color: var(--signal-1);
+  border-color: var(--signal-1);
+}
+
+.dx-btn--ghost,
+.dx-btn--ghost:visited {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text-dim);
+}
+
+.dx-btn--ghost:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.dx-home__rule {
+  width: 1px;
+  height: 3.2rem;
+  background: linear-gradient(180deg, var(--line), transparent);
+  margin: 3.4rem 0 0;
+}
+
+/* ---- footer ---- */
+
+.md-footer-meta { border-top: 1px solid var(--line-soft); }
+
+/* ---- responsive ---- */
+
+@media screen and (max-width: 60em) {
+  .dx-home__title { font-size: 2.7rem; }
+}
+
+@media screen and (max-width: 44.9em) {
+  .dx-home { position: static; min-height: 82vh; }
+  .dx-home__title { font-size: 2.1rem; }
+  .dx-home__lede { font-size: 0.88rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dx-btn { transition: none; }
+}
