@@ -154,6 +154,7 @@ pub async fn host(
             }
         }
     };
+
     let profile = worker.profile_model(model, overhead).await?;
     println!(
         "  {} machine holds up to {} layers of {}",
@@ -165,14 +166,10 @@ pub async fn host(
     let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
     let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
     if !sentinels.is_empty() {
-        crate::discovery::bootstrap(
-            &sentinels,
-            identity.signing_public().to_vec(),
-            &registry,
-        )
-        .await;
+        crate::discovery::bootstrap(&sentinels, identity.signing_public().to_vec(), &registry).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+
     let caps = { analyze(&*registry.lock().await) };
     let assignment = assign_slice(&caps, model, profile.total_layers, profile.max_layers, 2)
         .ok_or_else(|| anyhow::anyhow!("machine too small to hold any slice of {}", model))?;
@@ -191,24 +188,18 @@ pub async fn host(
         .await?;
     println!("  {} slice loaded and ready", "✓".bright_green());
 
-    let announce_addr = public_addr.as_deref().unwrap_or(listen);
-    let daemon_endpoint = format!("http://{}", announce_addr);
-
     let self_node_id = identity.signing_public().to_vec();
     let self_kx_public = identity.kx_public().to_vec();
     let signing_key = identity.signing_key.clone();
     let shared_worker = Arc::new(Mutex::new(worker));
     let identity_kx = Arc::new(identity.key_exchange);
     let addr: std::net::SocketAddr = listen.parse()?;
+    let compute_port = addr.port() + 1000;
 
     let relay_state = crate::relay::RelayState::new();
     spawn_gossip_server(addr, Arc::clone(&registry), relay_state.clone());
-    crate::gossip::spawn_prune_loop(
-        Arc::clone(&registry),
-        std::time::Duration::from_secs(30),
-    );
+    crate::gossip::spawn_prune_loop(Arc::clone(&registry), std::time::Duration::from_secs(30));
 
-    let compute_port = addr.port() + 1000;
     let compute_addr: std::net::SocketAddr =
         format!("{}:{}", addr.ip(), compute_port).parse()?;
     spawn_compute_server(
@@ -218,36 +209,60 @@ pub async fn host(
         model.to_string(),
     );
 
+    let announce_addr = public_addr.as_deref().unwrap_or(listen);
     let announce_ip = announce_addr.split(':').next().unwrap_or("127.0.0.1");
-    let compute_endpoint = format!("http://{}:{}", announce_ip, compute_port);
+    let probe_endpoint = format!("http://{}:{}", announce_ip, compute_port);
+    let probe_daemon_endpoint = format!("http://{}", announce_addr);
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let self_reachable = {
+    let (self_reachable, observed_ip) = {
         let probes: Vec<String> = sentinels
             .iter()
-            .filter(|s| s.as_str() != daemon_endpoint)
+            .filter(|s| s.as_str() != probe_daemon_endpoint)
             .cloned()
             .collect();
         if probes.is_empty() {
-            tracing::info!("no external sentinel to probe; assuming reachable (public bootstrap)");
-            true
+            tracing::info!("no external sentinel to probe, assuming reachable");
+            (true, None)
         } else {
-            let mut result = false;
+            let mut reachable = false;
+            let mut observed: Option<String> = None;
             for s in &probes {
-                if crate::gossip::check_my_reachability(s, &compute_endpoint).await {
-                    result = true;
+                let (ok, seen) = crate::gossip::check_my_reachability(s, &probe_endpoint).await;
+                if observed.is_none() {
+                    observed = seen;
+                }
+                if ok {
+                    reachable = true;
                     break;
                 }
             }
-            result
+            (reachable, observed)
         }
     };
 
+    let advertised_ip = match (public_addr.as_deref(), observed_ip.as_deref()) {
+        (Some(explicit), _) => explicit.split(':').next().unwrap_or(announce_ip).to_string(),
+        (None, Some(seen)) => seen.to_string(),
+        (None, None) => announce_ip.to_string(),
+    };
+
+    let daemon_endpoint = format!("http://{}:{}", advertised_ip, addr.port());
+    let compute_endpoint = format!("http://{}:{}", advertised_ip, compute_port);
+
     if self_reachable {
-        println!("  {} this node is reachable (can serve directly)", "✓".bright_green());
+        println!(
+            "  {} reachable at {} (serving directly)",
+            "✓".bright_green(),
+            compute_endpoint.bright_white()
+        );
     } else {
-        println!("  {} this node is behind NAT (not directly reachable)", "⚠".bright_yellow());
+        println!(
+            "  {} behind NAT, seen from outside as {}",
+            "⚠".bright_yellow(),
+            advertised_ip.bright_white()
+        );
         if let Some(sentinel) = sentinels
             .iter()
             .find(|s| s.as_str() != daemon_endpoint)
@@ -259,7 +274,7 @@ pub async fn host(
                 Arc::clone(&identity_kx),
                 Arc::clone(&shared_worker),
             );
-            println!("  {} relaying compute through sentinel (NAT mode)", "✓".bright_green());
+            println!("  {} relaying compute through sentinel", "✓".bright_green());
         }
     }
 

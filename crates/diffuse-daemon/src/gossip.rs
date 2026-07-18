@@ -94,23 +94,41 @@ impl Gossip for GossipService {
         &self,
         request: Request<ReachabilityRequest>,
     ) -> Result<Response<ReachabilityResponse>, Status> {
+        let source_ip = request
+            .remote_addr()
+            .map(|a| a.ip())
+            .ok_or_else(|| Status::internal("cannot determine caller ip"))?;
+
         let req = request.into_inner();
-        let endpoint = req.compute_endpoint;
-        let addr = endpoint
-            .strip_prefix("http://")
-            .unwrap_or(&endpoint)
-            .to_string();
-        let reachable = match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            tokio::net::TcpStream::connect(&addr),
-        )
-        .await
-        {
-            Ok(Ok(_)) => true,
-            _ => false,
+        let port = extract_port(&req.compute_endpoint).unwrap_or(0);
+        if port == 0 {
+            return Err(Status::invalid_argument("bad compute endpoint port"));
+        }
+
+        let addr = match source_ip {
+            std::net::IpAddr::V4(v4) => format!("{}:{}", v4, port),
+            std::net::IpAddr::V6(v6) => format!("[{}]:{}", v6, port),
         };
+
+        let reachable = matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await,
+            Ok(Ok(_))
+        );
+
+        let observed_address = match source_ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("[{}]", v6),
+        };
+
         tracing::info!("reachability check for {}: {}", addr, reachable);
-        Ok(Response::new(ReachabilityResponse { reachable }))
+        Ok(Response::new(ReachabilityResponse {
+            reachable,
+            observed_address,
+        }))
     }
 }
 
@@ -137,7 +155,7 @@ pub async fn gossip_with(
 
     let mut reg = registry.lock().await;
     let accepted = merge_authentic(&mut reg, received);
-    reg.touch(endpoint);
+    reg.touch_endpoint(endpoint);
     drop(reg);
 
     Ok(accepted)
@@ -165,6 +183,11 @@ pub fn spawn_gossip_server(
     })
 }
 
+fn extract_port(endpoint: &str) -> Option<u16> {
+    let after_scheme = endpoint.strip_prefix("http://").unwrap_or(endpoint);
+    after_scheme.rsplit(':').next()?.parse().ok()
+}
+
 pub fn spawn_prune_loop(
     registry: Arc<Mutex<PeerRegistry>>,
     interval: std::time::Duration,
@@ -186,7 +209,7 @@ pub fn spawn_prune_loop(
 pub async fn check_my_reachability(
     sentinel_endpoint: &str,
     my_compute_endpoint: &str,
-) -> bool {
+) -> (bool, Option<String>) {
     let result = async {
         let mut client = GossipClient::connect(sentinel_endpoint.to_string()).await?;
         let resp = client
@@ -195,14 +218,22 @@ pub async fn check_my_reachability(
             })
             .await?
             .into_inner();
-        Ok::<bool, anyhow::Error>(resp.reachable)
+        Ok::<(bool, String), anyhow::Error>((resp.reachable, resp.observed_address))
     }
     .await;
+
     match result {
-        Ok(r) => r,
+        Ok((reachable, observed)) => {
+            let observed = if observed.is_empty() {
+                None
+            } else {
+                Some(observed)
+            };
+            (reachable, observed)
+        }
         Err(e) => {
             tracing::warn!("reachability check failed: {}, assuming reachable", e);
-            true
+            (true, None)
         }
     }
 }

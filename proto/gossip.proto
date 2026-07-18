@@ -26,6 +26,7 @@ message ReachabilityRequest {
 }
 message ReachabilityResponse {
   bool reachable = 2;
+  string observed_address = 3;
 }
 service Gossip {
   rpc Exchange(GossipRequest) returns (GossipResponse);
