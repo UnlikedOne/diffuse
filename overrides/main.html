@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {{ super() }}
+  {% if page and page.file and page.file.src_path == "index.md" %}
+    <style>
+      .md-main,
+      .md-main__inner,
+      .md-content,
+      .md-content__inner {
+        position: static;
+        margin: 0;
+        padding: 0;
+        max-width: none;
+        width: 100%;
+      }
+      .md-content__inner::before { display: none; }
+      .md-content__inner > h1:first-of-type { display: none; }
+      .md-sidebar { display: none; }
+      .md-footer { display: none; }
+      .md-content__button { display: none; }
+      .md-grid { max-width: none; }
+    </style>
+  {% endif %}
+{% endblock %}
