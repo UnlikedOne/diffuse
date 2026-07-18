@@ -106,6 +106,34 @@ Follow it with `tail -f ~/.diffuse/host.log`, stop it with `pkill diffuse`. For 
 node that survives a reboot, see `deploy/README.md` in the repository for the
 systemd unit.
 
+## Disk space
+
+Models are downloaded to the Hugging Face cache, which grows quickly. A node
+downloads the full model even when it only serves a slice of the layers, so a
+7B model costs the full download regardless of the tranche assigned.
+
+Check what is stored:
+
+```bash
+du -sh ~/.cache/huggingface/hub/models--* | sort -rh
+```
+
+Remove a model you no longer serve:
+
+```bash
+rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct
+```
+
+Failed downloads leave partial blobs behind. They occupy space and serve no
+purpose:
+
+```bash
+find ~/.cache/huggingface/hub -name "*.incomplete" -delete
+```
+
+If a load fails with `No space left on device`, this cache is usually the
+reason.
+
 ## What the encryption actually does
 
 This is the part worth reading carefully, because it is the reason the project
