@@ -6,14 +6,6 @@ affect someone actually using Diffuse.
 
 ## Affects correctness
 
-**Greedy decoding only.** Generation always takes the highest probability token.
-There is no sampling, no temperature, no top-p. On short answers this is fine. On
-longer ones the model falls into repetition loops of the form "not even light,
-not even particles, not even the speed of light". This has not been confirmed
-against a single machine reference run, so the possibility that the distributed
-pipeline degrades the computation rather than the decoder cannot yet be excluded.
-That check is the highest priority open question.
-
 **Partial shard download falls back on middle slices.** The loader reads
 safetensors metadata, works out which shards hold the assigned layers, and
 downloads only those. It works for a slice starting at layer 0. For a slice in
@@ -111,3 +103,16 @@ Jackson after asking for three colours returned "4. Green, 5. Yellow, 6. Purple"
 Beyond correctness this was a privacy defect, since two different users would
 have shared cache state. Sessions are now UUIDs, cleared explicitly when a query
 ends, and expire after ten minutes otherwise.
+
+**Sequence position was read from a cache indexed by global layer index.** Stages
+other than the first never advanced their position counter, because
+`DynamicCache.get_seq_length()` reads layer 0 and a sliced stage writes its keys
+and values at the layer indices it inherited from the full model. A stage holding
+layers 16 to 31 filled cache entries 16 to 31 and left entry 0 empty forever, so
+its reported sequence length stayed at zero. Every generated token was therefore
+positioned as if it were the first: attention saw the full history, but the
+rotary encoding restarted from zero each step, and output degraded progressively
+into repetition. This is what produced the repetitive text in the July benchmark,
+which had been attributed to greedy decoding. Position is now tracked per session
+in the runner rather than read from the cache. Parity against a single machine
+reference is exact, token for token.

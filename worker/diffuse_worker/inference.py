@@ -1,4 +1,5 @@
 import inspect
+import time
 
 import torch
 from transformers import DynamicCache
@@ -9,16 +10,17 @@ class SliceRunner:
         self.slice = model_slice
         self.caches = {}
         self.cache_seen = {}
+        self.seq_lens = {}
         self._layer_params = self._detect_layer_params()
 
     def _touch_session(self, session_id):
-        import time
         now = time.monotonic()
         self.cache_seen[session_id] = now
         stale = [s for s, t in self.cache_seen.items() if now - t > 600]
         for s in stale:
             self.caches.pop(s, None)
             self.cache_seen.pop(s, None)
+            self.seq_lens.pop(s, None)
 
     def _detect_layer_params(self):
         if not self.slice.layers:
@@ -54,33 +56,29 @@ class SliceRunner:
         pos_emb = self._position_embeddings(hidden, start_pos)
         seq_len = hidden.shape[1]
         params = self._layer_params
-
         base_kwargs = {}
         if pos_emb is not None and "position_embeddings" in params:
             base_kwargs["position_embeddings"] = pos_emb
+        if "position_ids" in params and pos_emb is None:
+            base_kwargs["position_ids"] = torch.arange(
+                start_pos, start_pos + seq_len, device=hidden.device
+            )
         if cache is not None:
+            if "past_key_values" in params:
+                base_kwargs["past_key_values"] = cache
+            elif "past_key_value" in params:
+                base_kwargs["past_key_value"] = cache
+            if "use_cache" in params:
+                base_kwargs["use_cache"] = True
             if "cache_position" in params:
                 base_kwargs["cache_position"] = torch.arange(
                     start_pos, start_pos + seq_len, device=hidden.device
                 )
-            if "use_cache" in params:
-                base_kwargs["use_cache"] = True
-            if "position_ids" in params and pos_emb is None:
-                base_kwargs["position_ids"] = torch.arange(
-                    start_pos, start_pos + seq_len, device=hidden.device
-                ).unsqueeze(0)
-
         for layer in self.slice.layers:
-            kwargs = dict(base_kwargs)
-            if cache is not None:
-                if "past_key_values" in params:
-                    kwargs["past_key_values"] = cache
-                elif "past_key_value" in params:
-                    kwargs["past_key_value"] = cache
-            out = layer(hidden, **kwargs)
+            out = layer(hidden, **base_kwargs)
             hidden = out[0] if isinstance(out, tuple) else out
         return hidden
-
+    
     def _head(self, hidden: torch.Tensor) -> torch.Tensor:
         hidden = self.slice.norm(hidden)
         return self.slice.lm_head(hidden)
@@ -95,29 +93,22 @@ class SliceRunner:
             if cache is None:
                 cache = DynamicCache()
                 self.caches[session_id] = cache
-            else:
-                start_pos = cache.get_seq_length()
-
+                self.seq_lens[session_id] = 0
+            start_pos = self.seq_lens.get(session_id, 0)
         if self.slice.is_first() and is_input_ids:
             hidden = self._embed(tensor_in)
         else:
             hidden = tensor_in
-
+        seq_len = hidden.shape[1]
         hidden = self._run_layers(hidden, cache, start_pos)
-
+        if cache is not None:
+            self.seq_lens[session_id] = start_pos + seq_len
         if self.slice.is_last():
             return self._head(hidden)
         return hidden
 
-    def _touch_session(self, session_id: str):
-        import time
-        now = time.monotonic()
-        self.cache_seen[session_id] = now
-        stale = [s for s, t in self.cache_seen.items() if now - t > 600]
-        for s in stale:
-            self.caches.pop(s, None)
-            self.cache_seen.pop(s, None)
 
     def clear_session(self, session_id: str):
         self.caches.pop(session_id, None)
         self.cache_seen.pop(session_id, None)
+        self.seq_lens.pop(session_id, None)

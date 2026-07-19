@@ -78,14 +78,18 @@ machines. That is a limitation of the client, not of the network.
 
 ### What this run does not establish
 
-**Output quality was poor.** Generation was correct on short prompts but
-degenerated into repetition on longer ones, producing text of the form "not even
-light, not even particles, not even the speed of light". Greedy decoding with no
-sampling is the obvious suspect, but it has not been confirmed against a single
-machine reference run of the same model. Until that check is done, the
-possibility that the distributed pipeline itself degrades the computation cannot
-be ruled out. The latency figures stand either way, but a reader reproducing this
-run should expect the same repetition.
+**Output quality was poor during this run.** Generation degenerated into
+repetition on longer outputs. The cause has since been found and fixed: each
+stage derived its sequence position from `DynamicCache.get_seq_length()`, which
+reads layer index 0. Layers keep their global index when a model is sliced, so a
+stage holding layers 16 to 31 wrote its keys and values at indices 16 to 31 and
+left index 0 empty forever. That stage therefore restarted its rotary position
+encoding from zero on every generated token: the attention saw the full history,
+but each new token was positioned as if it were the first. Sequence position is
+now tracked per session in the runner rather than read from the cache, and the
+pipeline reproduces a single machine reference token for token. The latency
+figures below were measured before that fix and remain valid, since the bug
+affected correctness rather than speed.
 
 **Partial shard download did not take effect.** The mechanism exists and works on
 slices that begin at layer 0, but on middle slices the guard that checks for
