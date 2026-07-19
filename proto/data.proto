@@ -94,6 +94,14 @@ message ProfileResponse {
   string device = 9;
 }
 
+message ClearSessionRequest {
+  string session_id = 1;
+}
+
+message ClearSessionResponse {
+  bool ok = 1;
+}
+
 service InferenceWorker {
   rpc LoadSlice(LoadSliceRequest) returns (LoadSliceResponse);
   rpc RunSlice(SliceRequest) returns (SliceResponse);
@@ -101,4 +109,5 @@ service InferenceWorker {
   rpc Decode(DecodeRequest) returns (DecodeResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc ProfileModel(ProfileRequest) returns (ProfileResponse);
+  rpc ClearSession(ClearSessionRequest) returns (ClearSessionResponse);
 }

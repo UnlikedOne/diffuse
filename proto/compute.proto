@@ -20,6 +20,7 @@ message ComputeResponse {
 
 service Compute {
   rpc RunSlice(ComputeRequest) returns (ComputeResponse);
+  rpc ClearSession(ClearSessionRequest) returns (ClearSessionResponse);
 }
 
 message RelayEnvelope {
@@ -41,4 +42,12 @@ message RelayComputeRequest {
 service Relay {
   rpc Attach(stream RelayReply) returns (stream RelayEnvelope);
   rpc RelayCompute(RelayComputeRequest) returns (ComputeResponse);
+}
+
+message ClearSessionRequest {
+  string session_id = 1;
+}
+
+message ClearSessionResponse {
+  bool ok = 1;
 }

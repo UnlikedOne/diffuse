@@ -13,7 +13,7 @@ use diffuse_trust::transport::{decrypt, encrypt, KeyExchange};
 
 use pb::compute_client::ComputeClient;
 use pb::compute_server::Compute;
-use pb::{ComputeRequest, ComputeResponse};
+use pb::{ComputeRequest, ComputeResponse, ClearSessionRequest, ClearSessionResponse};
 
 fn tensor_to_bytes(t: &Tensor) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -73,6 +73,16 @@ impl Compute for ComputeService {
             .await
             .map_err(|e| Status::internal(format!("compute failed: {}", e)))?;
         Ok(Response::new(resp))
+    }
+
+    async fn clear_session(
+        &self,
+        request: Request<ClearSessionRequest>,
+    ) -> Result<Response<ClearSessionResponse>, Status> {
+        let session_id = request.into_inner().session_id;
+        let mut worker = self.worker.lock().await;
+        let _ = worker.clear_session(&session_id).await;
+        Ok(Response::new(ClearSessionResponse { ok: true }))
     }
 }
 

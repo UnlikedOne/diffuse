@@ -405,6 +405,37 @@ impl Orchestrator {
         Ok(ids)
     }
 
+    pub async fn clear_session(&mut self, session_id: &str) {
+        for stage in &mut self.stages {
+            for replica in &mut stage.replicas {
+                match replica {
+                    Replica::Local { worker, .. } => {
+                        let _ = worker.clear_session(session_id).await;
+                    }
+                    Replica::Remote { client, compute_endpoint, .. } => {
+                        if client.is_none() {
+                            *client = ComputeClient::connect(compute_endpoint.clone())
+                                .await
+                                .ok()
+                                .map(|c| {
+                                    c.max_decoding_message_size(128 * 1024 * 1024)
+                                        .max_encoding_message_size(128 * 1024 * 1024)
+                                });
+                        }
+                        if let Some(c) = client {
+                            let _ = c
+                                .clear_session(crate::compute::pb::ClearSessionRequest {
+                                    session_id: session_id.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                    Replica::Relayed { .. } => {}
+                }
+            }
+        }
+    }
+
     pub async fn generate_streaming<F>(
         &mut self,
         prompt_ids: &[i64],

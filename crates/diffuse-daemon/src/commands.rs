@@ -473,7 +473,9 @@ pub async fn query(
     println!("  {} generating over encrypted channel...", "→".bright_blue());
     println!();
 
-    let out = orch.generate(&ids, max_tokens, "query-session", Some(eos)).await?;
+    let session_id = format!("query-{}", uuid::Uuid::new_v4());
+    let out = orch.generate(&ids, max_tokens, &session_id, Some(eos)).await?;
+    orch.clear_session(&session_id).await;
     tracing::info!("generated {} tokens total, {} new", out.len(), out.len() - ids.len());
     tracing::info!("new token ids: {:?}", &out[ids.len()..]);
     let text = tokenizer_worker.decode(&out[ids.len()..], true).await?;

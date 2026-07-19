@@ -130,6 +130,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             end_layer=self.slice.end_layer if self.loaded else 0,
         )
     
+    def ClearSession(self, request, context):
+        if self.runner is not None:
+            self.runner.clear_session(request.session_id)
+        return data_pb2.ClearSessionResponse(ok=True)
+    
     def ProfileModel(self, request, context):
         try:
             from diffuse_worker.capacity import plan_capacity

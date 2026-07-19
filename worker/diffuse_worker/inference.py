@@ -8,7 +8,17 @@ class SliceRunner:
     def __init__(self, model_slice):
         self.slice = model_slice
         self.caches = {}
+        self.cache_seen = {}
         self._layer_params = self._detect_layer_params()
+
+    def _touch_session(self, session_id):
+        import time
+        now = time.monotonic()
+        self.cache_seen[session_id] = now
+        stale = [s for s, t in self.cache_seen.items() if now - t > 600]
+        for s in stale:
+            self.caches.pop(s, None)
+            self.cache_seen.pop(s, None)
 
     def _detect_layer_params(self):
         if not self.slice.layers:
@@ -80,6 +90,7 @@ class SliceRunner:
         cache = None
         start_pos = 0
         if use_cache and session_id:
+            self._touch_session(session_id)
             cache = self.caches.get(session_id)
             if cache is None:
                 cache = DynamicCache()
@@ -98,5 +109,15 @@ class SliceRunner:
             return self._head(hidden)
         return hidden
 
+    def _touch_session(self, session_id: str):
+        import time
+        now = time.monotonic()
+        self.cache_seen[session_id] = now
+        stale = [s for s, t in self.cache_seen.items() if now - t > 600]
+        for s in stale:
+            self.caches.pop(s, None)
+            self.cache_seen.pop(s, None)
+
     def clear_session(self, session_id: str):
         self.caches.pop(session_id, None)
+        self.cache_seen.pop(session_id, None)

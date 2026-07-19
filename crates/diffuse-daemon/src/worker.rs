@@ -3,7 +3,7 @@ pub mod pb {
 }
 
 use pb::inference_worker_client::InferenceWorkerClient;
-use pb::{DecodeRequest, EncodeRequest, HealthRequest, LoadSliceRequest, SliceRequest, Tensor};
+use pb::{ClearSessionRequest, DecodeRequest, EncodeRequest, HealthRequest, LoadSliceRequest, SliceRequest, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct WorkerProfile {
@@ -27,6 +27,15 @@ impl WorkerHandle {
             .max_decoding_message_size(128 * 1024 * 1024)
             .max_encoding_message_size(128 * 1024 * 1024);
         Ok(Self { endpoint, client })
+    }
+
+    pub async fn clear_session(&mut self, session_id: &str) -> anyhow::Result<()> {
+        self.client
+            .clear_session(ClearSessionRequest {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn load_slice(
