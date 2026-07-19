@@ -91,19 +91,24 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         if self.slice.tokenizer is None:
             return data_pb2.EncodeResponse(ok=False, error="tokenizer not available on this slice")
         try:
+            templated = False
             if len(request.messages) > 0:
                 messages = [{"role": m.role, "content": m.content} for m in request.messages]
                 text = self.slice.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
+                templated = True
             elif request.apply_chat_template:
                 messages = [{"role": "user", "content": request.text}]
                 text = self.slice.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
+                templated = True
             else:
                 text = request.text
-            ids = self.slice.tokenizer(text, return_tensors="pt")["input_ids"][0].tolist()
+            ids = self.slice.tokenizer(
+                text, return_tensors="pt", add_special_tokens=not templated
+            )["input_ids"][0].tolist()
             eos = self.slice.tokenizer.eos_token_id
             return data_pb2.EncodeResponse(token_ids=ids, ok=True, eos_token_id=eos if eos is not None else -1)
         except Exception as exc:

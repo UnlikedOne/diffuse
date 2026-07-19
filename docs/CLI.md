@@ -164,18 +164,21 @@ not reveal is covered in [Privacy](PRIVACY.md).
 
 ## Reaching nodes behind NAT
 
-A node with a public IP is dialed directly and works today. A node behind NAT has
-no address a client can dial, so Diffuse routes it through a sentinel relay
-instead.
+A node with a public IP is dialed directly. A node behind NAT has no address a
+client can dial, so Diffuse routes it through a sentinel relay instead.
 
-That relay path works in a single-machine test but is **not yet reliable between
-independent networks**. If a node on one network hosts a model and a client on
-another network tries to reach it, the client currently fails with `all replicas
-dead` or a failure to pre-connect to `0.0.0.0:10440`. Serving from behind NAT
-across networks should be treated as non-functional until this is fixed.
-Consuming from behind NAT works fine. The design and current status are in
-[NAT relay design](nat-relay-design.md).
+The node detects its own reachability by asking a sentinel to probe it. If the
+probe fails, the node opens a persistent stream to the sentinel and registers
+itself as reachable through the relay. Clients that need it are then routed via
+`RelayCompute` rather than dialing it directly. The sentinel forwards encrypted
+payloads without being able to read them: it holds no session key.
 
+This works across independent networks. A node behind a home router in one
+country can serve a slice to a client in another, with the sentinel acting only
+as a rendezvous point.
+
+The relay costs two extra network legs per token compared to a direct route.
+That overhead has not been measured yet.
 ## Known rough edges
 
 The startup banner still prints `version 0.1.0` on a v0.2.0 build. The version

@@ -1,191 +1,131 @@
-# NAT Relay Design
+# NAT relay
 
-Status: design approved, implementation pending.
+Most machines on the internet cannot be dialed. A laptop on a home network, a
+workstation in an office, a VM behind a corporate firewall: all of them can open
+outbound connections, none of them can accept inbound ones. If Diffuse only
+worked for machines with public addresses, it would be a cloud product with extra
+steps.
 
-This document specifies how nodes behind NAT can serve compute in Diffuse, using
-a sentinel as an encrypted relay. It is the design agreed before implementation;
-follow it step by step when building the feature.
+This page describes how a node behind NAT serves a slice anyway.
 
-## Problem
+Status: implemented and working across independent networks. A node behind a home
+router in one country has served a slice to a client on a different network in
+another, with a sentinel acting only as a rendezvous point.
 
-A node behind NAT can open outbound connections but cannot accept inbound ones.
-Today the client (via the orchestrator) dials each pipeline node directly with
-`connect_compute(endpoint)`. When the node is behind NAT this fails with
-"connection refused". Such a node can consume inference but cannot serve it.
+## The problem
 
-Brick 1 (already implemented) lets a node learn whether it is reachable: at
-startup it asks a sentinel to dial it back on its compute port, and it records a
-`reachable` flag that travels in the gossip records.
+A node that holds layers 8 to 16 has to receive an encrypted hidden state from
+whoever holds layers 0 to 8, run its slice, and send the result onward. That
+requires being reachable. Behind NAT, the node has a private address such as
+192.168.1.42 and the router presents a single public address shared with every
+other device on the network. Nothing outside can open a connection to it.
 
-This design covers the next step: making unreachable nodes serve compute through
-a relay, without ever exposing plaintext to the relay.
+The classic answers are UPnP port mapping, which is unreliable and often
+disabled, and hole punching, which fails against symmetric NAT. Diffuse uses
+neither. It uses connection reversal through a sentinel, which works everywhere
+outbound connections work, at the cost of an extra hop.
 
-## Principle
+## Detecting the situation
 
-An unreachable node opens a permanent outbound stream to a sentinel. The sentinel
-pushes incoming compute requests down that stream and forwards the replies back.
-The compute payload stays end to end encrypted between the client and the serving
-node, so the sentinel only ever sees ciphertext plus flow metadata.
+A node does not assume anything about its own reachability. It asks.
 
-## Actors
+On startup, after binding its compute port, the node calls `CheckReachability` on
+a sentinel, passing the compute endpoint it believes it has. The sentinel reads
+the source IP of that call, which is the node's real public address as seen from
+outside, and attempts a TCP connection back to that address on the given port.
 
-- C: the client that initiates a query and orchestrates the pipeline.
-- S: a sentinel with a public address, acting as relay.
-- N: a node behind NAT that serves a slice.
+The sentinel returns two things: whether the connection succeeded, and the
+observed address. Both matter.
 
-## Flow
+If the probe succeeds, the node is directly reachable and announces itself
+normally. If it fails, the node knows it is behind NAT and switches to relayed
+mode. Either way it now knows its public address, which is the fix for a subtle
+earlier bug: a node that binds `0.0.0.0` used to announce `0.0.0.0` in gossip,
+so every NAT'd node in the network collided under the same identifier and clients
+derived a useless `0.0.0.0:10440` compute endpoint. Nodes now advertise the
+address the sentinel actually saw.
 
-### Registration (at N startup, when N is unreachable)
+If no external sentinel is available to probe against, the node assumes it is
+reachable. That is the correct assumption for a public bootstrap node, which is
+the only case where the situation arises.
 
-1. N detects it is unreachable (Brick 1).
-2. N opens a permanent bidirectional stream to S via `Relay.Connect`.
-3. The first message N sends identifies it by `node_id`.
-4. S stores `node_id -> sender` in a registration table, where `sender` is the
-   sending side of the channel that pushes work toward N.
-5. The stream stays open for N's lifetime, with keepalives. If it drops, N
-   reconnects.
+## Registering with the relay
 
-### Request (C wants to compute on N)
+A node that discovers it is behind NAT opens a long lived bidirectional stream to
+a sentinel: the `Attach` RPC.
 
-1. C builds its route and sees N is `reachable: false`.
-2. Instead of `connect_compute(N)`, C calls `Relay.RelayCompute` on S, passing
-   N's `node_id` and its usual encrypted `ComputeRequest`.
-3. S looks up N's channel, generates a unique `request_id`, and pushes
-   `{request_id, ComputeRequest}` into the stream toward N.
-4. S registers a pending entry `request_id -> oneshot sender` and waits on it
-   with a timeout.
+The first message on that stream is a registration marker carrying the node's
+public key. The sentinel records the mapping from node id to stream and keeps the
+stream open. Because the node opened the connection outbound, the NAT allows
+traffic back along it indefinitely.
 
-### Compute and return
+From then on the sentinel can push work to a node it could never have dialed.
 
-1. N receives `{request_id, ComputeRequest}` on its stream.
-2. N decrypts (it holds the key, it is the E2E recipient), runs its worker,
-   re-encrypts the result.
-3. N sends `{request_id, ComputeResponse}` back on the same stream.
-4. S finds the pending entry via `request_id` and delivers the `ComputeResponse`
-   into the oneshot channel.
-5. The waiting `RelayCompute` call wakes up and returns the response to C.
+## Routing a request
 
-C now has a response computed by N, without the sentinel ever seeing plaintext
-and without N ever needing to be reachable.
+When a client builds a route and finds that the replica it needs is marked as
+unreachable, it does not try to connect. It sends a `RelayCompute` call to the
+sentinel, containing the target node id and the encrypted compute request.
 
-## Protocol (proto additions)
+The sentinel looks up the node id in its registration table, wraps the request in
+an envelope with a fresh request id, and pushes it down the attached stream. The
+node receives it, runs its slice, and sends a reply back up the same stream
+carrying the same request id. The sentinel matches the reply to the waiting
+caller and returns it.
 
-```proto
-message RelayRegister {
-  bytes node_id = 1;
-}
+If the target is not attached, the sentinel returns `target not attached` rather
+than hanging, and the client marks that replica dead and tries another.
 
-message RelayEnvelope {
-  string request_id = 1;
-  ComputeRequest request = 2;
-}
+## What the sentinel can and cannot see
 
-message RelayReply {
-  string request_id = 1;
-  ComputeResponse response = 2;
-}
+The sentinel forwards ciphertext. Session keys are established between the client
+and each serving node directly, using X25519, and the payload is encrypted with
+ChaCha20-Poly1305. The sentinel holds no key that would let it decrypt anything
+passing through it.
 
-message RelayComputeRequest {
-  bytes target_node_id = 1;
-  ComputeRequest request = 2;
-}
+What it does see is metadata: which node is talking to which, how often, and how
+large the payloads are. A sentinel operator can build a picture of who serves
+what and when. This is real and worth stating plainly. It is the same trade
+that any rendezvous server involves.
 
-service Relay {
-  // N opens this permanent stream: it sends a first RelayReply carrying its
-  // registration, then receives RelayEnvelope items and answers with RelayReply.
-  rpc Connect(stream RelayReply) returns (stream RelayEnvelope);
-  // C calls this to reach a node behind NAT.
-  rpc RelayCompute(RelayComputeRequest) returns (ComputeResponse);
-}
-```
+It also sees the node ids of everyone attached to it, which is public
+information anyway, since node ids circulate in signed gossip.
 
-Note on `Connect`: the registration is carried as the first `RelayReply` on the
-outbound stream (with an empty `request_id` reserved for registration, and the
-`node_id` conveyed there), or via a dedicated first-message convention. Decide
-the exact encoding at implementation time; the simplest is a reserved
-`request_id = "register"` whose payload carries the node id.
+## Leaving
 
-## Broker state (sentinel side)
+When a node stops, its stream to the sentinel breaks. The sentinel notices the
+broken stream, removes the registration, and evicts the peer from its registry
+immediately rather than waiting for the gossip staleness timeout.
 
-Two shared structures behind async locks:
+That eviction matters. Without it, there is a window of up to a minute where the
+peer is gone but still advertised, and clients route to a node that no longer
+exists, getting `target not attached` after already committing to a route. The
+relay knows about the departure long before gossip would, so it tells the
+registry.
 
-- `registrations: Map<node_id, mpsc::Sender<RelayEnvelope>>`
-  Push work toward each connected unreachable node.
-- `pending: Map<request_id, oneshot::Sender<ComputeResponse>>`
-  Wake the waiting `RelayCompute` call when its reply returns.
+## Cost
 
-On `RelayCompute`:
-1. Generate `request_id`.
-2. Create a oneshot channel, insert its sender into `pending`.
-3. Look up the target in `registrations`; if absent, fail fast (client marks the
-   replica dead and fails over, consistent with existing behavior).
-4. Push the envelope toward N.
-5. Await the oneshot with a timeout. On timeout, remove the pending entry and
-   return an error.
+A relayed hop is two network legs instead of one: client to sentinel, sentinel to
+node, and the same on the way back. On a pipeline with several relayed stages
+this adds up.
 
-On a `RelayReply` arriving from N:
-1. Look up `pending` by `request_id`.
-2. Send the response into the oneshot; remove the entry.
-3. If no pending entry exists (late reply after timeout), drop it.
+The overhead has not been measured. Every benchmark so far routed directly to
+nodes with public addresses, so the relay cost is currently unknown. Measuring it
+is the next benchmark that matters, because in a real peer to peer network most
+contributors are behind a router and the relayed path is the common case, not the
+exception.
 
-On N disconnect:
-1. Remove N from `registrations`.
-2. Any pending requests targeting N time out and fail over.
+## Limits
 
-## Client routing change
+The sentinel is a single point of failure for the nodes attached to it. If it
+goes down, every relayed node it was serving becomes unreachable until it
+reattaches elsewhere. Nothing currently reattaches automatically to a different
+sentinel.
 
-In `build_from_registry`, when a peer is `reachable: false`:
-- Do not `connect_compute` directly.
-- Mark the replica as relayed, remembering which sentinel relays it and the
-  target `node_id`.
-- In the failover path, relayed replicas call `RelayCompute` on the sentinel
-  instead of `RunSlice` directly.
+There is no admission control on the relay. A node can attach and consume
+sentinel bandwidth without contributing anything. On a public network with
+adversarial participants this would need addressing.
 
-A relayed replica should be flagged so the latency instrumentation can attribute
-the extra hop, and so the UI can be honest that this path is slower.
-
-## Design decisions (agreed)
-
-1. Latency: each token to a relayed node travels C -> S -> N -> S -> C, i.e. two
-   extra network legs per token. This is accepted and must be measured. Relayed
-   replicas are flagged so instrumentation and UI can be honest about it.
-2. Security invariant: encryption is between C and N, keyed from N's kx public
-   key published in signed gossip. S cannot derive the key and cannot decrypt.
-   The relay sees only metadata (who talks to whom, sizes, timing), never
-   content. This must be stated plainly in the threat model.
-3. Multiplexing: one sentinel may relay several nodes and serve several clients
-   at once; `request_id` correlates. No per-sentinel node cap in v1 (note as
-   future hardening).
-4. Fallback: if the target is not registered (not yet connected or dropped),
-   `RelayCompute` fails fast and the client fails over to another replica, reusing
-   the existing failover logic.
-
-## Threat model addition (to write)
-
-Add to the limitations/threat model: when a serving node is behind NAT, its
-compute traffic is relayed through a sentinel. The sentinel observes flow
-metadata for that traffic (endpoints, timing, volume) but never plaintext, since
-the payload is end to end encrypted between client and serving node. Users who
-must hide this metadata should serve only from reachable nodes or place a
-network anonymity layer beneath Diffuse.
-
-## Implementation order (next session)
-
-1. Proto: add the `Relay` service and messages; regenerate.
-2. Sentinel broker: `registrations` and `pending` maps, the two RPCs, timeouts,
-   disconnect cleanup.
-3. Node side: when unreachable, open and maintain the `Connect` stream, handle
-   envelopes, run the worker, send replies, reconnect on drop.
-4. Client routing: relayed replica variant, `RelayCompute` in the failover path,
-   relayed flag for instrumentation.
-5. Test: unreachable node (e.g. behind home NAT or Cloud Shell) serving a slice
-   through the Hetzner sentinel to a separate client.
-6. Docs: threat model addition, README note on relayed serving and its latency
-   cost.
-
-## Explicitly out of scope for this feature
-
-- UDP hole punching and direct NAT-to-NAT paths (future, likely via iroh/QUIC).
-- UPnP/NAT-PMP port mapping (small future add).
-- Topology-aware placement to minimize relay hops (premature until metrics show
-  the need).
+Relayed nodes are not currently sent `ClearSession` when a client finishes,
+because the cleanup path only walks direct replicas. Their KV caches expire on a
+ten minute timer instead.
