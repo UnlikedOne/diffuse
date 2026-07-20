@@ -97,7 +97,7 @@ unmaterialised parameters fires on the embeddings, the final norm and the output
 head, which a middle stage legitimately does not need. The loader then falls back
 to a full download. Every node in this run therefore fetched the entire 14.5 GB
 model rather than only its own shards. This does not affect the latency numbers,
-but the disk saving remains unproven.
+but the disk saving remains unproven.The guard has since been corrected and partial loading now works on every slice,so a rerun would show the disk saving. The latency figures are unaffected.
 
 **No relay path was exercised.** All three nodes had public addresses. Relayed
 serving through a sentinel adds two extra network legs per token and was not

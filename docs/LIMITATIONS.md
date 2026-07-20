@@ -4,17 +4,6 @@ Everything on this page is a real defect or a real gap, written down rather than
 discovered by whoever tries the project next. Items are grouped by how much they
 affect someone actually using Diffuse.
 
-## Affects correctness
-
-**Partial shard download falls back on middle slices.** The loader reads
-safetensors metadata, works out which shards hold the assigned layers, and
-downloads only those. It works for a slice starting at layer 0. For a slice in
-the middle it fails: the guard that verifies every parameter was materialised
-fires on the embeddings, the final norm and the output head, which a middle stage
-does not need and should not be checked for. The loader then silently falls back
-to downloading the whole model. The disk saving therefore does not currently
-apply to the case that needs it most.
-
 ## Affects usability
 
 **One node per machine.** Ports 9440, 10440 and 50051 are fixed. A second daemon
@@ -116,3 +105,18 @@ into repetition. This is what produced the repetitive text in the July benchmark
 which had been attributed to greedy decoding. Position is now tracked per session
 in the runner rather than read from the cache. Parity against a single machine
 reference is exact, token for token.
+
+**Partial shard download fell back to a full download on most slices.** The
+loader builds a skeleton on the meta device from the full config, replaces the
+layer list with the slice it keeps, and downloads only the shards holding those
+layers. A final guard then verified that every parameter in the model had been
+materialised, which is the wrong contract: the skeleton still contains the
+embeddings, the final norm and the output head, and a slice legitimately does not
+need all of them. Any slice missing one of those three failed the guard and fell
+back to fetching the whole model, so nodes downloaded 14.5 GB regardless of the
+slice they served. Modules the slice does not use are now detached from the
+skeleton after the tie repair and before the guard, which makes "no meta
+parameters anywhere" a correct and strict invariant with no exception list to
+maintain. The tensor selection also now downloads the embedding matrix for a
+final stage only when the checkpoint has tied embeddings, since that is the only
+case where the head weight has no separate entry in the file.

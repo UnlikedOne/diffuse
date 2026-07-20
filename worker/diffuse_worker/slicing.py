@@ -110,11 +110,9 @@ def _tensor_is_needed(name, start_layer, end_layer, total, tied=False):
     if m:
         idx = int(m.group(1))
         return start_layer <= idx < end_layer
-    if start_layer == 0 and _is_embedding_tensor(name):
-        return True
-    if end_layer == total:
-        return True
-    return False
+    if _is_embedding_tensor(name):
+        return start_layer == 0 or (tied and end_layer == total)
+    return end_layer == total
 
 
 def _plan_download(model_id, start_layer, end_layer, total, hf_token, tied=False):
@@ -138,6 +136,21 @@ def _remap_key(name: str, start_layer: int) -> str:
     idx = int(m.group(1))
     return name[: m.start(1)] + str(idx - start_layer) + name[m.end(1) :]
 
+def _detach_unused_modules(model, parts, start_layer, end_layer, total):
+    unused = []
+    if start_layer != 0:
+        unused.append(parts.get("embed"))
+        unused.append(parts.get("pos_embed"))
+    if end_layer != total:
+        unused.append(parts.get("norm"))
+        unused.append(parts.get("lm_head"))
+    targets = {id(m) for m in unused if m is not None}
+    if not targets:
+        return
+    for module in model.modules():
+        for attr_name, child in list(module.named_children()):
+            if id(child) in targets:
+                setattr(module, attr_name, None)
 
 def _rebuild_meta_buffers(model, cfg):
     for module in list(model.modules()):
@@ -291,6 +304,7 @@ class ModelSlice:
         ):
             head.weight = src.weight
 
+        _detach_unused_modules(model, parts, start_layer, end_layer, total)
         _rebuild_meta_buffers(model, cfg)
 
         leftover_params = [
@@ -305,7 +319,6 @@ class ModelSlice:
                 f"buffers {leftover_buffers[:5]}"
             )
 
-        parts = _resolve_backbone(model)
         self.kind = parts["kind"]
         self.layers = kept
         self.rotary = parts["rotary"]
