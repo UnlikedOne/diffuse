@@ -9,6 +9,11 @@ pub struct Peer {
     pub model_id: String,
     pub start_layer: u32,
     pub end_layer: u32,
+    /// Total number of layers in the model, as reported by the worker that
+    /// hosts this slice. `0` means "unknown" — a peer running a version that
+    /// predates this field, in which case consumers fall back to inferring the
+    /// total from the highest advertised `end_layer`.
+    pub total_layers: u32,
     pub last_seen_ms: u64,
     pub signature: Vec<u8>,
     pub kx_public: Vec<u8>,
@@ -129,6 +134,14 @@ impl Peer {
         buf.extend_from_slice(&self.start_layer.to_le_bytes());
         buf.extend_from_slice(&self.end_layer.to_le_bytes());
         buf.extend_from_slice(&self.kx_public);
+        // `total_layers` was added after the original signing scheme. Only fold
+        // it into the signed bytes when it is present, so that a peer running an
+        // older version (which never sends the field, decoded here as 0) still
+        // produces bytes a newer verifier can reproduce and accept. Newer peers
+        // always set it, so their signatures cover it.
+        if self.total_layers != 0 {
+            buf.extend_from_slice(&self.total_layers.to_le_bytes());
+        }
         buf
     }
 }
@@ -145,11 +158,46 @@ mod tests {
             model_id: model.to_string(),
             start_layer: 0,
             end_layer: 24,
+            total_layers: 24,
             last_seen_ms,
             signature: vec![1, 2, 3],
             kx_public: vec![9; 32],
             reachable: true,
         }
+    }
+
+    #[test]
+    fn signable_bytes_are_backward_compatible_when_total_is_unknown() {
+        // A peer that predates the total_layers field reports 0. Its signed
+        // bytes must be identical to the pre-field scheme so a newer verifier,
+        // recomputing them, still accepts the old signature.
+        let mut legacy = peer(1, "http://a", "m", now_ms());
+        legacy.total_layers = 0;
+        let legacy_bytes = legacy.signable_bytes();
+
+        // Reconstruct the pre-field byte layout by hand.
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&legacy.node_id);
+        expected.push(0);
+        expected.extend_from_slice(legacy.daemon_endpoint.as_bytes());
+        expected.push(0);
+        expected.extend_from_slice(legacy.worker_endpoint.as_bytes());
+        expected.push(0);
+        expected.extend_from_slice(legacy.model_id.as_bytes());
+        expected.push(0);
+        expected.extend_from_slice(&legacy.start_layer.to_le_bytes());
+        expected.extend_from_slice(&legacy.end_layer.to_le_bytes());
+        expected.extend_from_slice(&legacy.kx_public);
+        assert_eq!(legacy_bytes, expected, "unknown total must not alter the signed bytes");
+
+        // A peer that does report a total folds it into the signature.
+        let mut modern = peer(1, "http://a", "m", now_ms());
+        modern.total_layers = 64;
+        assert_eq!(
+            modern.signable_bytes().len(),
+            legacy_bytes.len() + 4,
+            "a known total extends the signed bytes by its 4 encoded bytes"
+        );
     }
 
     #[test]

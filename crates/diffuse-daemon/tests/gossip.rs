@@ -68,9 +68,11 @@ async fn unsigned_peer_is_rejected() {
         model_id: "m".to_string(),
         start_layer: 0,
         end_layer: 12,
+        total_layers: 0,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     };
     {
         let mut b = reg_b.lock().await;

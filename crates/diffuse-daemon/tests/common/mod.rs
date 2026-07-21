@@ -27,9 +27,11 @@ pub fn signed_peer(
         model_id: model_id.to_string(),
         start_layer: start,
         end_layer: end,
+        total_layers: 0,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     };
     peer.signature = sign(key, &peer.signable_bytes());
     peer

@@ -10,9 +10,11 @@ fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
         model_id: model.to_string(),
         start_layer: start,
         end_layer: end,
+        total_layers: 0,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     }
 }
 

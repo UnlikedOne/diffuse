@@ -31,6 +31,48 @@ impl ModelCapacity {
             .map(|s| (s.start_layer, s.end_layer))
             .collect()
     }
+
+    /// The layer ranges of `[0, total_layers)` that no live slice covers.
+    /// Unlike `missing_slices` (which only reports announced-but-unheld slices),
+    /// this walks the whole model depth and reports every hole — including the
+    /// tail region no peer advertises at all, e.g. `12:64` when the network only
+    /// holds `0:12` of a 64-layer model. Empty when the model is fully servable.
+    pub fn coverage_gaps(&self) -> Vec<(u32, u32)> {
+        let mut gaps = Vec::new();
+        if self.total_layers == 0 {
+            return gaps;
+        }
+        let mut covered_up_to = 0u32;
+        loop {
+            // Extend the covered prefix as far as any live slice reaches.
+            let mut progressed = true;
+            while progressed {
+                progressed = false;
+                for s in &self.slices {
+                    if s.replicas > 0 && s.start_layer <= covered_up_to && s.end_layer > covered_up_to
+                    {
+                        covered_up_to = s.end_layer;
+                        progressed = true;
+                    }
+                }
+            }
+            if covered_up_to >= self.total_layers {
+                break;
+            }
+            // There is a hole starting at `covered_up_to`. It runs until the next
+            // live slice begins, or to the end of the model if none do.
+            let next_start = self
+                .slices
+                .iter()
+                .filter(|s| s.replicas > 0 && s.start_layer > covered_up_to)
+                .map(|s| s.start_layer)
+                .min()
+                .unwrap_or(self.total_layers);
+            gaps.push((covered_up_to, next_start));
+            covered_up_to = next_start;
+        }
+        gaps
+    }
 }
 
 pub fn analyze(registry: &PeerRegistry) -> Vec<ModelCapacity> {
@@ -44,7 +86,19 @@ pub fn analyze(registry: &PeerRegistry) -> Vec<ModelCapacity> {
     let mut result = Vec::new();
 
     for (model_id, model_peers) in by_model {
-        let total_layers = model_peers.iter().map(|p| p.end_layer).max().unwrap_or(0);
+        // Prefer the model's true depth as reported by the worker (propagated
+        // through gossip in `total_layers`). Fall back to inferring it from the
+        // highest advertised `end_layer` only when no peer reports a real total
+        // — i.e. every holder predates the field. Without this, a lone node
+        // serving layers 0:6 of a 64-layer model would look complete (7/7)
+        // instead of incomplete (7/64).
+        let reported_total = model_peers
+            .iter()
+            .map(|p| p.total_layers)
+            .filter(|&t| t > 0)
+            .max();
+        let total_layers = reported_total
+            .unwrap_or_else(|| model_peers.iter().map(|p| p.end_layer).max().unwrap_or(0));
 
         let mut slice_counts: BTreeMap<(u32, u32), usize> = BTreeMap::new();
         for p in &model_peers {

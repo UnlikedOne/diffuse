@@ -17,7 +17,7 @@ pub enum Mode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "diffuse", version, about = "Decentralized private LLM inference")]
+#[command(name = "diffuse", version = env!("DIFFUSE_VERSION"), about = "Decentralized private LLM inference")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
