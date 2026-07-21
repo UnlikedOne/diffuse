@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::capacity::{analyze, ModelCapacity};
-use crate::commands::{incomplete_model_message, spawn_local_worker, WorkerGuard};
+use crate::commands::{incomplete_model_message, start_local_tokenizer};
 use crate::identity::Identity;
 use crate::orchestrator::build_from_registry;
 use crate::registry::PeerRegistry;
@@ -189,10 +189,7 @@ pub async fn serve(
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let _tok_child: WorkerGuard = spawn_local_worker(TOKENIZER_PORT)?;
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    let tok_endpoint = format!("http://127.0.0.1:{}", TOKENIZER_PORT);
-    let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
+    let (_tok_child, mut tokenizer_worker) = start_local_tokenizer(TOKENIZER_PORT).await?;
 
     let mut loaded_model: Option<String> = None;
     if let Some(model) = default_model.as_deref() {
@@ -230,7 +227,11 @@ pub async fn serve(
     );
     println!();
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
