@@ -39,6 +39,7 @@ nav:
   - Start:
       - Overview: ARCHITECTURE.md
       - CLI reference: CLI.md
+      - Choosing A Model: CHOOSING-A-MODEL.md
   - Understand:
       - Privacy model: PRIVACY.md
       - NAT relay design: nat-relay-design.md
