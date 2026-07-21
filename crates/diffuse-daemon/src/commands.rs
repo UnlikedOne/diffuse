@@ -19,7 +19,7 @@ use diffuse_trust::crypto::sign;
 /// Explain why an incomplete model can't be served, naming the exact layer
 /// ranges the network is missing so the user knows what to spin up rather than
 /// letting a query build a route that dead-ends partway through the model.
-fn incomplete_model_message(cap: &ModelCapacity) -> String {
+pub(crate) fn incomplete_model_message(cap: &ModelCapacity) -> String {
     let gaps = cap.coverage_gaps();
     if gaps.is_empty() {
         return format!("model {} is present but not fully servable", cap.model_id);
@@ -413,7 +413,7 @@ impl Drop for WorkerGuard {
     }
 }
 
-fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
+pub(crate) fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
     let worker_dir = find_worker_dir()?;
     let python = format!("{}/.venv/bin/python", worker_dir);
     let child = std::process::Command::new(python)

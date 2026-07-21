@@ -2,6 +2,7 @@ use clap::Parser;
 use diffuse_daemon::commands;
 use diffuse_daemon::config::{Cli, Command};
 use diffuse_daemon::identity::Identity;
+use diffuse_daemon::serve;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,5 +41,11 @@ async fn main() -> anyhow::Result<()> {
         } => commands::query(&model, &prompt, &bootstrap, max_tokens, identity).await,
         Command::Models { bootstrap } => commands::models(&bootstrap, identity).await,
         Command::Chat { bootstrap, memory } => commands::chat(&bootstrap, memory, identity).await,
+        Command::Serve {
+            port,
+            host,
+            model,
+            bootstrap,
+        } => serve::serve(&host, port, model, &bootstrap, identity).await,
     }
 }

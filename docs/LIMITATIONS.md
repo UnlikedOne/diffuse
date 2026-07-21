@@ -23,6 +23,15 @@ directory by hand.
 **Version string is wrong.** The banner prints `version 0.1.0` regardless of the
 actual release. It is a hardcoded string rather than `CARGO_PKG_VERSION`.
 
+**The OpenAI API has no authentication.** `diffuse serve` exposes an
+OpenAI-compatible HTTP API with no API key check, no rate limiting and no access
+control. It binds to `127.0.0.1` by default for that reason, and prints a warning
+when started on any other address. Anyone who can reach the port can spend your
+node's capacity and read the models it can route to. Do not expose it on an
+untrusted network. If you need remote access, put it behind a reverse proxy that
+adds authentication and TLS, or a private tunnel, rather than binding it to a
+public interface.
+
 **Local model paths do not work.** `--model` is passed to the Hugging Face API,
 which rejects a filesystem path. Serving weights that are not on the Hub is not
 possible. Beyond the API question there is a design issue: the model id doubles
