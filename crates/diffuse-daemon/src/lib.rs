@@ -13,3 +13,4 @@ pub mod display;
 pub mod commands;
 pub mod worker;
 pub mod relay;
+pub mod serve;

@@ -19,7 +19,7 @@ use diffuse_trust::crypto::sign;
 /// Explain why an incomplete model can't be served, naming the exact layer
 /// ranges the network is missing so the user knows what to spin up rather than
 /// letting a query build a route that dead-ends partway through the model.
-fn incomplete_model_message(cap: &ModelCapacity) -> String {
+pub(crate) fn incomplete_model_message(cap: &ModelCapacity) -> String {
     let gaps = cap.coverage_gaps();
     if gaps.is_empty() {
         return format!("model {} is present but not fully servable", cap.model_id);
@@ -152,27 +152,21 @@ pub async fn host(
             .and_then(|p| p.parse().ok())
             .unwrap_or(50051);
         println!("  {} starting local worker on port {}...", "→".bright_blue(), port);
-        let child = spawn_local_worker(port)?;
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        Some(child)
+        Some(spawn_local_worker(port)?)
     } else {
         None
     };
 
-    let mut worker = {
-        let mut attempts = 0;
-        loop {
-            match WorkerHandle::connect(worker_endpoint.to_string()).await {
-                Ok(w) => break w,
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= 30 {
-                        return Err(anyhow::anyhow!("worker never came up: {}", e));
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
+    let mut worker = if spawn_worker {
+        match connect_worker(worker_endpoint, Duration::from_secs(30)).await {
+            Ok(w) => w,
+            Err(e) => anyhow::bail!(
+                "the local worker did not become ready within 30 seconds. It imports torch and transformers before opening its gRPC port, which can take longer on a loaded machine or a cold disk cache. This is a local worker startup problem, not a network issue. Underlying error: {}",
+                e
+            ),
         }
+    } else {
+        connect_worker(worker_endpoint, Duration::from_secs(30)).await?
     };
 
     let profile = worker.profile_model(model, overhead).await?;
@@ -413,7 +407,7 @@ impl Drop for WorkerGuard {
     }
 }
 
-fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
+pub(crate) fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
     let worker_dir = find_worker_dir()?;
     let python = format!("{}/.venv/bin/python", worker_dir);
     let child = std::process::Command::new(python)
@@ -425,6 +419,39 @@ fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
     Ok(WorkerGuard::new(child))
+}
+
+pub(crate) async fn connect_worker(endpoint: &str, timeout: Duration) -> anyhow::Result<WorkerHandle> {
+    let start = std::time::Instant::now();
+    loop {
+        match WorkerHandle::connect(endpoint.to_string()).await {
+            Ok(worker) => return Ok(worker),
+            Err(e) => {
+                if start.elapsed() >= timeout {
+                    anyhow::bail!(
+                        "could not reach the inference worker at {} after {} seconds (last error: {})",
+                        endpoint,
+                        timeout.as_secs(),
+                        e
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn start_local_tokenizer(port: u16) -> anyhow::Result<(WorkerGuard, WorkerHandle)> {
+    let guard = spawn_local_worker(port)?;
+    let endpoint = format!("http://127.0.0.1:{}", port);
+    match connect_worker(&endpoint, Duration::from_secs(30)).await {
+        Ok(worker) => Ok((guard, worker)),
+        Err(e) => anyhow::bail!(
+            "the local tokenizer worker on port {} did not become ready within 30 seconds. It imports torch and transformers before opening its gRPC port, which can take longer on a loaded machine or a cold disk cache. This is a local worker startup problem, not a network issue. Underlying error: {}",
+            port,
+            e
+        ),
+    }
 }
 
 pub async fn query(
@@ -475,12 +502,8 @@ pub async fn query(
         model.bright_white()
     );
 
-    // Local lightweight tokenizer worker (privacy: tokens never leave the client).
     let tok_port: u16 = 50099;
-    let _tok_child = spawn_local_worker(tok_port)?;
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    let tok_endpoint = format!("http://127.0.0.1:{}", tok_port);
-    let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
+    let (_tok_child, mut tokenizer_worker) = start_local_tokenizer(tok_port).await?;
     tokenizer_worker.load_slice(model, 0, 0, "").await?;
 
     println!("  {} building encrypted route...", "→".bright_blue());
@@ -584,17 +607,13 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
     println!("  {}", "type your message, or /quit to leave".truecolor(120, 130, 150));
     println!();
 
-    // Local tokenizer worker (tokens stay client-side).
     let tok_port: u16 = 50099;
-    let _tok_child = {
+    let (_tok_child, mut tokenizer_worker) = {
         let spinner = start_spinner("warming up");
-        let c = spawn_local_worker(tok_port);
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        let result = start_local_tokenizer(tok_port).await;
         spinner.finish_and_clear();
-        c?
+        result?
     };
-    let tok_endpoint = format!("http://127.0.0.1:{}", tok_port);
-    let mut tokenizer_worker = WorkerHandle::connect(tok_endpoint).await?;
     tokenizer_worker.load_slice(&model, 0, 0, "").await?;
 
     let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
@@ -841,4 +860,37 @@ fn render_banner(version: &str, model: &str) {
         "╯".truecolor(frame.0, frame.1, frame.2)
     );
     println!();
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_worker_reports_endpoint_and_cause_on_failure() {
+        let endpoint = "http://127.0.0.1:59677";
+        let err = match connect_worker(endpoint, Duration::from_secs(1)).await {
+            Ok(_) => panic!("expected a connection failure"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("59677"), "message names the port: {}", msg);
+        assert!(
+            msg.contains("could not reach the inference worker"),
+            "message names the worker as the cause: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn worker_guard_kills_child_on_drop() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let guard = WorkerGuard::new(child);
+        drop(guard);
+        let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
+        assert!(!alive, "child {} should be gone after the guard drops", pid);
+    }
 }

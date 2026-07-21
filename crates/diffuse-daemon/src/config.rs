@@ -89,4 +89,15 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         memory: bool,
     },
+    /// Run a local OpenAI-compatible HTTP server in front of the network
+    Serve {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        bootstrap: Vec<String>,
+    },
 }

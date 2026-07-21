@@ -28,3 +28,6 @@ worker/diffuse_worker/*_pb2_grpc.py
 prod_oauth.txt
 *.pem
 *.key
+
+# Local Claude Code project notes, never tracked
+CLAUDE.md
