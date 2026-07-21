@@ -2,15 +2,20 @@ use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
 
 fn peer(endpoint: &str, last_seen_ms: u64) -> Peer {
     Peer {
-        node_id: vec![1, 2, 3],
+        // Identity follows the endpoint: distinct endpoints are distinct nodes,
+        // while re-announcing the same endpoint keeps the same node_id (which is
+        // what the registry keys on).
+        node_id: endpoint.as_bytes().to_vec(),
         daemon_endpoint: endpoint.to_string(),
         worker_endpoint: format!("{}-worker", endpoint),
         model_id: "test-model".to_string(),
         start_layer: 0,
         end_layer: 12,
+        total_layers: 0,
         last_seen_ms,
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     }
 }
 

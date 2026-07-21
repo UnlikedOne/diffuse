@@ -526,6 +526,30 @@ pub async fn build_from_registry(
     if slices.is_empty() {
         anyhow::bail!("no peers in registry serve model {}", model_id);
     }
+
+    // Refuse to build a route through a model the network only partially holds.
+    // Without this, a set of slices that stops short of `total_layers` (or leaves
+    // an interior hole) would yield an orchestrator that forwards activations
+    // into a dead end and returns garbage. Fail here, naming the missing ranges.
+    if let Some(cap) = crate::capacity::analyze(registry)
+        .into_iter()
+        .find(|c| c.model_id == model_id)
+    {
+        let gaps = cap.coverage_gaps();
+        if !gaps.is_empty() {
+            let missing = gaps
+                .iter()
+                .map(|(start, end)| format!("{}:{}", start, end))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "model {} is incomplete: no peer serves layers {} (of {} total)",
+                model_id,
+                missing,
+                cap.total_layers
+            );
+        }
+    }
     let mut stages = Vec::new();
     for (start, end) in slices {
         let peers: Vec<Peer> = registry.replicas_for_slice(model_id, start, end);

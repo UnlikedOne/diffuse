@@ -25,6 +25,7 @@ pub fn peer_to_info(p: &Peer) -> PeerInfo {
         signature: p.signature.clone(),
         kx_public: p.kx_public.clone(),
         reachable: p.reachable,
+        total_layers: p.total_layers,
     }
 }
 
@@ -36,6 +37,7 @@ pub fn info_to_peer(i: &PeerInfo) -> Peer {
         model_id: i.model_id.clone(),
         start_layer: i.start_layer,
         end_layer: i.end_layer,
+        total_layers: i.total_layers,
         last_seen_ms: i.last_seen_ms,
         signature: i.signature.clone(),
         kx_public: i.kx_public.clone(),

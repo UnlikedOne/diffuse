@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use owo_colors::OwoColorize;
 
-use crate::capacity::{analyze, assign_slice};
+use crate::capacity::{analyze, assign_slice, ModelCapacity};
 use crate::discovery::bootstrap;
 use crate::identity::Identity;
 use crate::registry::PeerRegistry;
@@ -15,6 +15,26 @@ use crate::discovery::spawn_gossip_loop;
 use crate::registry::{now_ms, Peer};
 use diffuse_trust::crypto::sign;
 
+
+/// Explain why an incomplete model can't be served, naming the exact layer
+/// ranges the network is missing so the user knows what to spin up rather than
+/// letting a query build a route that dead-ends partway through the model.
+fn incomplete_model_message(cap: &ModelCapacity) -> String {
+    let gaps = cap.coverage_gaps();
+    if gaps.is_empty() {
+        return format!("model {} is present but not fully servable", cap.model_id);
+    }
+    let missing = gaps
+        .iter()
+        .map(|(start, end)| format!("{}:{}", start, end))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "model {} is incomplete: no peer serves layers {} (of {} total). \
+         Waiting for those slices to come online, or host one yourself with `diffuse join`.",
+        cap.model_id, missing, cap.total_layers
+    )
+}
 
 fn human_bytes(b: u64) -> String {
     let gb = b as f64 / 1_073_741_824.0;
@@ -285,6 +305,7 @@ pub async fn host(
         model_id: model.to_string(),
         start_layer: assignment.start,
         end_layer: assignment.end,
+        total_layers: profile.total_layers,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: self_kx_public.clone(),
@@ -330,6 +351,7 @@ pub async fn host(
                         model_id: model.to_string(),
                         start_layer: assignment.start,
                         end_layer: assignment.end,
+                        total_layers: profile.total_layers,
                         last_seen_ms: now_ms(),
                         signature: Vec::new(),
                         kx_public: self_kx_public.clone(),
@@ -444,7 +466,7 @@ pub async fn query(
         .ok_or_else(|| anyhow::anyhow!("model {} not found on the network", model))?;
 
     if !cap.servable {
-        anyhow::bail!("model {} is present but not fully servable", model);
+        anyhow::bail!("{}", incomplete_model_message(cap));
     }
 
     println!(
@@ -558,7 +580,7 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
             .map_err(|_| anyhow::anyhow!("no model selected"))?
     };
 
-    render_banner(env!("CARGO_PKG_VERSION"), &model);
+    render_banner(env!("DIFFUSE_VERSION"), &model);
     println!("  {}", "type your message, or /quit to leave".truecolor(120, 130, 150));
     println!();
 

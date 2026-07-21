@@ -3,15 +3,19 @@ use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
 
 fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
     Peer {
-        node_id: vec![1],
+        // Distinct id per peer — the registry keys on node_id, so a shared id
+        // would collapse these into a single entry.
+        node_id: ep.as_bytes().to_vec(),
         daemon_endpoint: ep.to_string(),
         worker_endpoint: format!("{}-w", ep),
         model_id: model.to_string(),
         start_layer: start,
         end_layer: end,
+        total_layers: 0,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     }
 }
 

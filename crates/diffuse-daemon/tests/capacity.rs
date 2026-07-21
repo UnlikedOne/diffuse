@@ -2,16 +2,24 @@ use diffuse_daemon::capacity::analyze;
 use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
 
 fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
+    peer_with_total(model, ep, start, end, 0)
+}
+
+fn peer_with_total(model: &str, ep: &str, start: u32, end: u32, total: u32) -> Peer {
     Peer {
-        node_id: vec![1],
+        // The registry keys peers by node_id, so distinct peers must carry
+        // distinct ids or they collapse into one. Derive it from the endpoint.
+        node_id: ep.as_bytes().to_vec(),
         daemon_endpoint: ep.to_string(),
         worker_endpoint: format!("{}-w", ep),
         model_id: model.to_string(),
         start_layer: start,
         end_layer: end,
+        total_layers: total,
         last_seen_ms: now_ms(),
         signature: Vec::new(),
         kx_public: Vec::new(),
+        reachable: true,
     }
 }
 
@@ -51,6 +59,57 @@ fn model_with_missing_slice_is_not_servable() {
 
     assert_eq!(broken.total_layers, 36);
     assert!(!broken.servable, "broken has a gap at 12:24, not servable");
+}
+
+#[test]
+fn partial_model_reports_true_total_and_is_incomplete() {
+    let mut r = PeerRegistry::new(600_000);
+    // A single node serving layers 0:6 of a 64-layer model. The worker knows the
+    // model has 64 layers and gossips that in total_layers.
+    r.upsert(peer_with_total("big", "http://a1", 0, 6, 64));
+
+    let caps = analyze(&r);
+    let cap = caps.iter().find(|c| c.model_id == "big").unwrap();
+
+    // Without the propagated total this would infer 6 and look complete (6/6).
+    assert_eq!(cap.total_layers, 64, "total comes from the worker, not end_layer");
+    assert!(!cap.servable, "0:6 of a 64-layer model is not servable");
+    assert_eq!(
+        cap.coverage_gaps(),
+        vec![(6, 64)],
+        "everything past layer 6 is missing"
+    );
+}
+
+#[test]
+fn falls_back_to_end_layer_when_total_is_unknown() {
+    let mut r = PeerRegistry::new(600_000);
+    // Legacy peers that predate the total_layers field (report 0). Behaviour
+    // must match the old inference: total = highest end_layer.
+    r.upsert(peer("legacy", "http://a1", 0, 12));
+    r.upsert(peer("legacy", "http://b1", 12, 24));
+
+    let caps = analyze(&r);
+    let cap = caps.iter().find(|c| c.model_id == "legacy").unwrap();
+
+    assert_eq!(cap.total_layers, 24, "inferred from the highest end_layer");
+    assert!(cap.servable, "fully covered under the inferred total");
+    assert!(cap.coverage_gaps().is_empty());
+}
+
+#[test]
+fn coverage_gaps_reports_interior_holes() {
+    let mut r = PeerRegistry::new(600_000);
+    // Holds 0:12 and 24:36 of a 36-layer model, leaving 12:24 open in the middle.
+    r.upsert(peer_with_total("swiss", "http://a1", 0, 12, 36));
+    r.upsert(peer_with_total("swiss", "http://c1", 24, 36, 36));
+
+    let caps = analyze(&r);
+    let cap = caps.iter().find(|c| c.model_id == "swiss").unwrap();
+
+    assert_eq!(cap.total_layers, 36);
+    assert!(!cap.servable);
+    assert_eq!(cap.coverage_gaps(), vec![(12, 24)]);
 }
 
 #[test]
