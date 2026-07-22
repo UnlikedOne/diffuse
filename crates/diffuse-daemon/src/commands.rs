@@ -52,8 +52,7 @@ pub async fn plan(
     bootstrap_sentinels: &[String],
     identity: &Identity,
 ) -> anyhow::Result<()> {
-    println!();
-    println!("{}", "  ◆ DIFFUSE — capacity plan".bright_cyan().bold());
+    crate::tui::header(crate::tui::sym("🔎", "?"), "capacity plan");
     println!("  node {}", identity.short_id().dimmed());
     println!();
 
@@ -141,8 +140,7 @@ pub async fn host(
     public_addr: Option<String>,
     identity: Identity,
 ) -> anyhow::Result<()> {
-    println!();
-    println!("{}", "  ◆ DIFFUSE — joining network".bright_cyan().bold());
+    crate::tui::header(crate::tui::sym("📡", "^"), "joining the network");
     println!("  node {}", identity.short_id().dimmed());
 
     let _worker_child = if spawn_worker {
@@ -461,8 +459,7 @@ pub async fn query(
     max_tokens: usize,
     identity: Identity,
 ) -> anyhow::Result<()> {
-    println!();
-    println!("{}", "  ◆ DIFFUSE — query".bright_cyan().bold());
+    crate::tui::header(crate::tui::sym("🔮", ">"), "query");
     println!("  node {}", identity.short_id().dimmed());
 
     let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
@@ -559,11 +556,15 @@ async fn discover_network(
 }
 
 pub async fn models(bootstrap_sentinels: &[String], identity: Identity) -> anyhow::Result<()> {
-    println!();
-    println!("{}", "  ◆ DIFFUSE — models on the network".bright_cyan().bold());
+    crate::tui::header(crate::tui::sym("🌐", "::"), "models on the network");
     println!();
 
-    let registry = discover_network(bootstrap_sentinels, &identity).await?;
+    let registry = {
+        let sp = crate::tui::spinner("scanning the mesh");
+        let r = discover_network(bootstrap_sentinels, &identity).await;
+        sp.finish_and_clear();
+        r?
+    };
     let caps = { analyze(&*registry.lock().await) };
     let n = registry.lock().await.len();
     crate::display::render_network_state(&caps, n, 2);
@@ -598,13 +599,33 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
     let model = if servable.len() == 1 {
         servable[0].clone()
     } else {
-        inquire::Select::new("Choose a model", servable.clone())
-            .prompt()
-            .map_err(|_| anyhow::anyhow!("no model selected"))?
+        let labels: Vec<String> = servable
+            .iter()
+            .map(|m| {
+                let cap = caps.iter().find(|c| &c.model_id == m);
+                let layers = cap.map(|c| c.total_layers).unwrap_or(0);
+                let status = cap
+                    .map(|c| if c.is_robust(2) { "robust" } else { "fragile" })
+                    .unwrap_or("fragile");
+                format!("{}   ·   {} layers · {}", m, layers, status)
+            })
+            .collect();
+        let picked = inquire::Select::new(
+            &format!("{} choose a model", crate::tui::sym("🧩", ">")),
+            labels.clone(),
+        )
+        .prompt()
+        .map_err(|_| anyhow::anyhow!("no model selected"))?;
+        let idx = labels.iter().position(|l| l == &picked).unwrap_or(0);
+        servable[idx].clone()
     };
 
     render_banner(env!("DIFFUSE_VERSION"), &model);
-    println!("  {}", "type your message, or /quit to leave".truecolor(120, 130, 150));
+    println!(
+        "  {}   {}",
+        format!("{} connected", crate::tui::lock()).truecolor(80, 220, 160),
+        "type a message, or /help for commands".truecolor(120, 130, 150)
+    );
     println!();
 
     let tok_port: u16 = 50099;
@@ -623,12 +644,18 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
     };
 
     let mut history: Vec<(String, String)> = Vec::new();
+    let mut transcript: Vec<(String, String)> = Vec::new();
+    let mut total_tokens: usize = 0;
     let session_prefix = format!("{:016x}", now_ms());
     let mut turn = 0u64;
-    
+
     loop {
         use std::io::Write as _;
-        print!("{} ", "›".truecolor(240, 200, 60).bold());
+        print!(
+            "  {} {} ",
+            crate::tui::human().truecolor(240, 200, 60),
+            "›".truecolor(240, 200, 60).bold()
+        );
         let _ = std::io::stdout().flush();
         let mut input = String::new();
         if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
@@ -641,13 +668,34 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         }
         if msg == "/quit" || msg == "/exit" {
             println!();
-            println!("  {}", "goodbye.".truecolor(140, 140, 160));
+            println!("  {} {}", crate::tui::sym("👋", "*"), "goodbye.".truecolor(140, 140, 160));
             break;
         }
         if msg == "/reset" {
             history.clear();
-            println!("  {}", "conversation cleared.".truecolor(140, 140, 160));
-            println!();
+            crate::tui::note("conversation memory cleared.");
+            continue;
+        }
+        if msg == "/clear" {
+            print!("\x1b[2J\x1b[H");
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+        if msg == "/help" {
+            print_chat_help();
+            continue;
+        }
+        if msg == "/stats" {
+            print_chat_stats(turn, total_tokens);
+            continue;
+        }
+        if let Some(rest) = msg.strip_prefix("/save") {
+            let path = rest.trim();
+            let path = if path.is_empty() { "diffuse-chat.md" } else { path };
+            match save_transcript(path, &model, &transcript) {
+                Ok(_) => crate::tui::ok("saved", path),
+                Err(e) => crate::tui::error(&format!("save failed: {}", e)),
+            }
             continue;
         }
 
@@ -664,18 +712,32 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
             vec![("user".to_string(), msg.clone())]
         };
 
+        println!();
+        let seal = crate::tui::phase_spinner("sealing prompt");
         let (ids, eos) = match tokenizer_worker.encode_messages(messages).await {
             Ok(v) => v,
             Err(e) => {
+                seal.finish_and_clear();
                 println!("  {} {}", "encode error:".truecolor(220, 120, 120), e);
                 continue;
             }
         };
+        seal.finish_and_clear();
+        crate::tui::phase_done("prompt sealed", "X25519 · ChaCha20");
+        tokio::time::sleep(Duration::from_millis(140)).await;
 
-        println!();
-        print!("  ");
-        use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        let hops = orch.stages.len();
+        let route = crate::tui::phase_spinner("routing through the network");
+        tokio::time::sleep(Duration::from_millis(240)).await;
+        route.finish_and_clear();
+        crate::tui::phase_done(
+            "routed",
+            &format!("{} encrypted hop{}", hops, if hops == 1 { "" } else { "s" }),
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let gen_start = std::time::Instant::now();
+        let think = crate::tui::phase_spinner("thinking");
 
         let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
 
@@ -693,11 +755,17 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
 
             let mut printed = String::new();
             let mut collected: Vec<i64> = Vec::new();
+            let mut token_count = 0usize;
+            let mut live: Option<crate::tui::LiveMeter> = None;
 
             tokio::pin!(gen_fut);
             let result: anyhow::Result<Vec<i64>> = loop {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {
+                        match &live {
+                            Some(m) => m.clear(),
+                            None => think.finish_and_clear(),
+                        }
                         interrupted = true;
                         break Ok(collected.clone());
                     }
@@ -710,9 +778,17 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
                             if let Ok(text) = tokenizer_worker.decode(&collected, true).await {
                                 if text.len() > printed.len() && text.starts_with(&printed) {
                                     let delta = text[printed.len()..].to_string();
-                                    print!("{}", delta.truecolor(245, 220, 130));
-                                    let _ = std::io::stdout().flush();
                                     printed = text;
+                                    token_count += 1;
+                                    let rate =
+                                        token_count as f64 / gen_start.elapsed().as_secs_f64().max(0.001);
+                                    if live.is_none() {
+                                        think.finish_and_clear();
+                                        live = Some(start_answer());
+                                    }
+                                    let m = live.as_mut().unwrap();
+                                    m.push(&delta);
+                                    m.tick(&crate::tui::meter_text(rate, token_count));
                                 }
                             }
                         }
@@ -727,9 +803,17 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
                         if let Ok(text) = tokenizer_worker.decode(&collected, true).await {
                             if text.len() > printed.len() && text.starts_with(&printed) {
                                 let delta = text[printed.len()..].to_string();
-                                print!("{}", delta.truecolor(245, 220, 130));
-                                let _ = std::io::stdout().flush();
+                                printed = text;
+                                if live.is_none() {
+                                    think.finish_and_clear();
+                                    live = Some(start_answer());
+                                }
+                                live.as_mut().unwrap().push(&delta);
                             }
+                        }
+                        match &live {
+                            Some(m) => m.clear(),
+                            None => think.finish_and_clear(),
                         }
                         break res;
                     }
@@ -761,16 +845,88 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
             String::new()
         };
         println!();
-        println!();
+
+        let new_tokens = out.len().saturating_sub(ids.len());
+        total_tokens += new_tokens;
+        let secs = gen_start.elapsed().as_secs_f64().max(0.001);
+        let tok_s = new_tokens as f64 / secs;
+        let compute = orch.last_forward_compute_ms;
+        let network = orch.last_forward_network_ms;
+        let compute_pct = if compute + network > 0 {
+            ((compute as f64 / (compute + network) as f64) * 100.0).round() as u32
+        } else {
+            50
+        };
+        crate::tui::hud(hops, tok_s, compute_pct);
+        transcript.push((msg.clone(), answer.trim().to_string()));
         println!();
 
-        // Persist the exchange so the model "remembers" next turn.
         if memory {
             history.push(("user".to_string(), msg));
             history.push(("assistant".to_string(), answer.trim().to_string()));
         }
     }
 
+    Ok(())
+}
+
+fn start_answer() -> crate::tui::LiveMeter {
+    use std::io::Write;
+    crate::tui::role(crate::tui::robot(), "diffuse", crate::tui::ACCENT, "");
+    let rule = crate::tui::sym("─", "-").repeat(46);
+    println!(
+        "  {}",
+        rule.truecolor(crate::tui::FAINT.0, crate::tui::FAINT.1, crate::tui::FAINT.2)
+    );
+    println!();
+    print!("  ");
+    let _ = std::io::stdout().flush();
+    crate::tui::LiveMeter::new()
+}
+
+fn print_chat_help() {
+    println!();
+    crate::tui::section(crate::tui::sym("⌘", "/"), "commands");
+    let items = [
+        ("/help", "show this list"),
+        ("/reset", "clear conversation memory"),
+        ("/clear", "clear the screen"),
+        ("/stats", "session stats"),
+        ("/save [file]", "save the transcript as markdown"),
+        ("/quit", "leave the chat"),
+    ];
+    for (cmd, desc) in items {
+        println!(
+            "  {}  {}",
+            format!("{:<14}", cmd).truecolor(
+                crate::tui::GOLD.0,
+                crate::tui::GOLD.1,
+                crate::tui::GOLD.2
+            ),
+            desc.truecolor(crate::tui::MUTED.0, crate::tui::MUTED.1, crate::tui::MUTED.2)
+        );
+    }
+    println!();
+}
+
+fn print_chat_stats(turns: u64, total_tokens: usize) {
+    println!();
+    crate::tui::section(crate::tui::sym("📊", "#"), "session");
+    crate::tui::ok("turns", &turns.to_string());
+    crate::tui::ok("tokens generated", &total_tokens.to_string());
+    println!();
+}
+
+fn save_transcript(path: &str, model: &str, transcript: &[(String, String)]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut out = String::new();
+    out.push_str(&format!("# Diffuse chat · {}\n\n", model));
+    for (user, ai) in transcript {
+        out.push_str(&format!("**You:** {}\n\n", user));
+        out.push_str(&format!("**Diffuse:** {}\n\n", ai));
+    }
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(out.as_bytes())?;
     Ok(())
 }
 

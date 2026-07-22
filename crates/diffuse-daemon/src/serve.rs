@@ -156,8 +156,7 @@ pub async fn serve(
     bootstrap_sentinels: &[String],
     identity: Identity,
 ) -> anyhow::Result<()> {
-    println!();
-    println!("{}", "  ◆ DIFFUSE OpenAI-compatible server".bright_cyan().bold());
+    crate::tui::header(crate::tui::sym("⚡", "*"), "OpenAI-compatible server");
     println!("  node {}", identity.short_id().dimmed());
 
     if !is_loopback(host) {

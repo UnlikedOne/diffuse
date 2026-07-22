@@ -430,6 +430,7 @@ dependencies = [
  "axum",
  "bytemuck",
  "clap",
+ "console",
  "diffuse-trust",
  "ed25519-dalek",
  "hex",
