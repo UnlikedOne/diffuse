@@ -15,6 +15,7 @@ pub struct WorkerProfile {
     pub device: String,
 }
 
+#[derive(Clone)]
 pub struct WorkerHandle {
     pub endpoint: String,
     client: InferenceWorkerClient<tonic::transport::Channel>,
@@ -67,6 +68,7 @@ impl WorkerHandle {
         position: u64,
         activations: Tensor,
         use_cache: bool,
+        top_k: u32,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -76,6 +78,7 @@ impl WorkerHandle {
             position,
             activations: Some(activations),
             use_cache,
+            top_k,
         });
         let response = self.client.run_slice(request).await?.into_inner();
         if !response.ok {

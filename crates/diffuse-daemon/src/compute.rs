@@ -49,6 +49,47 @@ fn bytes_to_tensor(b: &[u8]) -> anyhow::Result<Tensor> {
     Ok(Tensor { shape, dtype, data })
 }
 
+pub fn argmax_last_row(logits: &Tensor) -> anyhow::Result<i64> {
+    if logits.shape.len() != 3 {
+        anyhow::bail!("expected 3D logits, got shape {:?}", logits.shape);
+    }
+    let seq = logits.shape[1] as usize;
+    let vocab = logits.shape[2] as usize;
+    let offset = (seq - 1) * vocab;
+
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    let mut consider = |i: usize, v: f32| {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    };
+
+    match logits.dtype.as_str() {
+        "float32" => {
+            let floats: &[f32] = bytemuck::cast_slice(&logits.data);
+            if floats.len() < offset + vocab {
+                anyhow::bail!("logits payload too short for shape {:?}", logits.shape);
+            }
+            for (i, &v) in floats[offset..offset + vocab].iter().enumerate() {
+                consider(i, v);
+            }
+        }
+        "bfloat16" => {
+            let raw: &[u16] = bytemuck::cast_slice(&logits.data);
+            if raw.len() < offset + vocab {
+                anyhow::bail!("logits payload too short for shape {:?}", logits.shape);
+            }
+            for (i, &v) in raw[offset..offset + vocab].iter().enumerate() {
+                consider(i, f32::from_bits((v as u32) << 16));
+            }
+        }
+        other => anyhow::bail!("unsupported logits dtype {}", other),
+    }
+    Ok(best_idx as i64)
+}
+
 pub fn tensor_to_bytes_pub(t: &Tensor) -> Vec<u8> {
     tensor_to_bytes(t)
 }
@@ -80,7 +121,7 @@ impl Compute for ComputeService {
         request: Request<ClearSessionRequest>,
     ) -> Result<Response<ClearSessionResponse>, Status> {
         let session_id = request.into_inner().session_id;
-        let mut worker = self.worker.lock().await;
+        let mut worker = self.worker.lock().await.clone();
         let _ = worker.clear_session(&session_id).await;
         Ok(Response::new(ClearSessionResponse { ok: true }))
     }
@@ -105,6 +146,7 @@ pub async fn request_slice(
     end: u32,
     session_id: &str,
     activations: &Tensor,
+    top_k: u32,
 ) -> anyhow::Result<(Tensor, u64)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -117,6 +159,7 @@ pub async fn request_slice(
             end_layer: end,
             session_id: session_id.to_string(),
             encrypted_activations: encrypted,
+            top_k,
         })
         .await?
         .into_inner();
@@ -168,7 +211,7 @@ pub async fn process_compute_request(
     let tensor = bytes_to_tensor(&plain)?;
     let compute_start = std::time::Instant::now();
     let out = {
-        let mut w = worker.lock().await;
+        let mut w = worker.lock().await.clone();
         w.run_slice(
             &req.model_id,
             req.start_layer,
@@ -177,6 +220,7 @@ pub async fn process_compute_request(
             0,
             tensor,
             true,
+            req.top_k,
         )
         .await?
     };

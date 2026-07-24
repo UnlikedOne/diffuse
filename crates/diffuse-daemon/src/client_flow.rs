@@ -1,3 +1,4 @@
+use crate::compute::pb::compute_client::ComputeClient;
 use crate::compute::request_slice;
 use crate::worker::pb::Tensor;
 use crate::worker::WorkerHandle;
@@ -23,23 +24,7 @@ fn ids_to_tensor(ids: &[i64]) -> Tensor {
 }
 
 fn argmax_last_token(logits: &Tensor) -> anyhow::Result<i64> {
-    if logits.shape.len() != 3 {
-        anyhow::bail!("expected 3D logits, got {:?}", logits.shape);
-    }
-    let seq = logits.shape[1] as usize;
-    let vocab = logits.shape[2] as usize;
-    let floats: &[f32] = bytemuck::cast_slice(&logits.data);
-    let offset = (seq - 1) * vocab;
-    let row = &floats[offset..offset + vocab];
-    let mut best_idx = 0usize;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &v) in row.iter().enumerate() {
-        if v > best_val {
-            best_val = v;
-            best_idx = i;
-        }
-    }
-    Ok(best_idx as i64)
+    crate::compute::argmax_last_row(logits)
 }
 
 pub struct ClientSession {
@@ -49,6 +34,7 @@ pub struct ClientSession {
     pub local_start: u32,
     pub local_end: u32,
     pub remote: RemoteStage,
+    pub remote_client: Option<ComputeClient<tonic::transport::Channel>>,
 }
 
 impl ClientSession {
@@ -64,13 +50,18 @@ impl ClientSession {
                 session_id,
                 0,
                 input,
-                false,
+                true,
+                0,
             )
             .await?;
 
-        let mut client = crate::compute::connect_compute(&self.remote.daemon_endpoint).await?;
+        if self.remote_client.is_none() {
+            self.remote_client =
+                Some(crate::compute::connect_compute(&self.remote.daemon_endpoint).await?);
+        }
+        let client = self.remote_client.as_mut().unwrap();
         let (logits, _compute_ms) = request_slice(
-            &mut client,
+            client,
             &self.remote.host_kx_public,
             &self.client_kx,
             &self.model_id,
@@ -78,6 +69,7 @@ impl ClientSession {
             self.remote.end_layer,
             session_id,
             &local_activations,
+            0,
         )
         .await?;
 
@@ -91,9 +83,15 @@ impl ClientSession {
         eos_id: Option<i64>,
     ) -> anyhow::Result<Vec<i64>> {
         let mut ids = prompt_ids.to_vec();
-        for _ in 0..max_new_tokens {
-            let logits = self.forward(&ids, session_id).await?;
-            let next = argmax_last_token(&logits)?;
+        let logits = self.forward(&ids, session_id).await?;
+        let mut next = argmax_last_token(&logits)?;
+        ids.push(next);
+        if Some(next) == eos_id {
+            return Ok(ids);
+        }
+        for _ in 1..max_new_tokens {
+            let logits = self.forward(&[next], session_id).await?;
+            next = argmax_last_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
                 break;

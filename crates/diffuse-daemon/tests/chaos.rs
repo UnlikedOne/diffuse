@@ -91,14 +91,18 @@ async fn generation_survives_dead_replica() {
         start_layer: 0,
         end_layer: mid,
         replicas: vec![
-            Replica { worker: a1, alive: true },
-            Replica { worker: a2, alive: true },
+            Replica::Local { worker: a1, alive: true },
+            Replica::Local { worker: a2, alive: true },
         ],
+        last_compute_ms: 0,
+        last_network_ms: 0,
     };
     let stage_b = Stage {
         start_layer: mid,
         end_layer: full,
-        replicas: vec![Replica { worker: b1, alive: true }],
+        replicas: vec![Replica::Local { worker: b1, alive: true }],
+        last_compute_ms: 0,
+        last_network_ms: 0,
     };
 
     let mut orch = Orchestrator {
@@ -106,6 +110,9 @@ async fn generation_survives_dead_replica() {
         stages: vec![stage_a, stage_b],
         spare_endpoints: vec![],
         target_replication: 2,
+        session_kx: std::sync::Arc::new(diffuse_trust::transport::KeyExchange::generate()),
+        last_forward_compute_ms: 0,
+        last_forward_network_ms: 0,
     };
 
     let (ids, _eos) = orch
@@ -129,7 +136,7 @@ async fn generation_survives_dead_replica() {
         .expect("decode");
     assert!(!text.is_empty(), "decoded text should not be empty");
 
-    let live_a = orch.stages[0].replicas.iter().filter(|r| r.alive).count();
+    let live_a = orch.stages[0].replicas.iter().filter(|r| r.is_alive()).count();
     assert_eq!(live_a, 1, "stage A should have exactly one live replica left");
 
     let _ = w_a2;

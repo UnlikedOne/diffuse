@@ -26,7 +26,7 @@ async fn make_node(
         }
     }
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    spawn_gossip_server(addr, Arc::clone(&reg));
+    spawn_gossip_server(addr, Arc::clone(&reg), diffuse_daemon::relay::RelayState::new());
     reg
 }
 

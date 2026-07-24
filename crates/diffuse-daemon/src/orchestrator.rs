@@ -63,10 +63,14 @@ pub struct Orchestrator {
     pub stages: Vec<Stage>,
     pub spare_endpoints: Vec<String>,
     pub target_replication: usize,
-    pub session_kx: KeyExchange,
+    pub session_kx: std::sync::Arc<KeyExchange>,
     pub last_forward_compute_ms: u64,
     pub last_forward_network_ms: u64,
 }
+
+pub const DECODE_TOP_K: u32 = 8;
+
+const TOPK_DTYPE: &str = "topk_i64_f32";
 
 fn ids_to_tensor(ids: &[i64]) -> Tensor {
     let mut data = Vec::with_capacity(ids.len() * 8);
@@ -80,25 +84,20 @@ fn ids_to_tensor(ids: &[i64]) -> Tensor {
     }
 }
 
-fn argmax_last_token(logits: &Tensor) -> anyhow::Result<i64> {
-    if logits.shape.len() != 3 {
-        anyhow::bail!("expected 3D logits, got shape {:?}", logits.shape);
-    }
-    let seq = logits.shape[1] as usize;
-    let vocab = logits.shape[2] as usize;
-    let floats: &[f32] = bytemuck::cast_slice(&logits.data);
-    let offset = (seq - 1) * vocab;
-    let row = &floats[offset..offset + vocab];
-
-    let mut best_idx = 0usize;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &v) in row.iter().enumerate() {
-        if v > best_val {
-            best_val = v;
-            best_idx = i;
+fn next_token(out: &Tensor) -> anyhow::Result<i64> {
+    if out.dtype == TOPK_DTYPE {
+        let k = out.shape.first().copied().unwrap_or(0) as usize;
+        if k == 0 || out.data.len() < k * 12 {
+            anyhow::bail!("malformed top-k payload: shape {:?}, {} bytes", out.shape, out.data.len());
         }
+        let id = i64::from_le_bytes(out.data[0..8].try_into().unwrap());
+        return Ok(id);
     }
-    Ok(best_idx as i64)
+    argmax_last_token(out)
+}
+
+fn argmax_last_token(logits: &Tensor) -> anyhow::Result<i64> {
+    crate::compute::argmax_last_row(logits)
 }
 
 impl Stage {
@@ -109,6 +108,7 @@ impl Stage {
         input: Tensor,
         use_cache: bool,
         session_kx: &KeyExchange,
+        top_k: u32,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -122,10 +122,13 @@ impl Stage {
             let hop_start = std::time::Instant::now();
             let attempt = match &mut self.replicas[idx] {
                 Replica::Local { worker, .. } => {
+                    let local_start = std::time::Instant::now();
                     worker
-                        .run_slice(model_id, start, end, session_id, 0, input.clone(), use_cache)
+                        .run_slice(
+                            model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
+                        )
                         .await
-                        .map(|t| (t, 0u64))
+                        .map(|t| (t, local_start.elapsed().as_millis() as u64))
                 }
                 Replica::Remote {
                     compute_endpoint,
@@ -144,6 +147,7 @@ impl Stage {
                                 end,
                                 session_id,
                                 &input,
+                                top_k,
                             )
                             .await
                         }
@@ -152,7 +156,7 @@ impl Stage {
                                 Ok(mut c) => {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
-                                        start, end, session_id, &input,
+                                        start, end, session_id, &input, top_k,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -179,6 +183,7 @@ impl Stage {
                         end,
                         session_id,
                         &input,
+                        top_k,
                     )
                     .await
                 }
@@ -322,29 +327,25 @@ impl Orchestrator {
         ids: &[i64],
         session_id: &str,
         use_cache: bool,
+        top_k: u32,
     ) -> anyhow::Result<Tensor> {
-        let mut tensor = ids_to_tensor(ids);
         let model_id = self.model_id.clone();
-        let session_kx = std::mem::replace(&mut self.session_kx, KeyExchange::generate());
-        let result = async {
-            let mut t = tensor.clone();
-            let mut compute_sum = 0u64;
-            let mut network_sum = 0u64;
-            for stage in self.stages.iter_mut() {
-                t = stage
-                    .run_with_failover(&model_id, session_id, t, use_cache, &session_kx)
-                    .await?;
-                compute_sum += stage.last_compute_ms;
-                network_sum += stage.last_network_ms;
-            }
-            self.last_forward_compute_ms = compute_sum;
-            self.last_forward_network_ms = network_sum;
-            Ok::<Tensor, anyhow::Error>(t)
+        let session_kx = self.session_kx.clone();
+        let last_stage = self.stages.len().saturating_sub(1);
+        let mut t = ids_to_tensor(ids);
+        let mut compute_sum = 0u64;
+        let mut network_sum = 0u64;
+        for (idx, stage) in self.stages.iter_mut().enumerate() {
+            let stage_top_k = if idx == last_stage { top_k } else { 0 };
+            t = stage
+                .run_with_failover(&model_id, session_id, t, use_cache, &session_kx, stage_top_k)
+                .await?;
+            compute_sum += stage.last_compute_ms;
+            network_sum += stage.last_network_ms;
         }
-        .await;
-        self.session_kx = session_kx;
-        let _ = &mut tensor;
-        result
+        self.last_forward_compute_ms = compute_sum;
+        self.last_forward_network_ms = network_sum;
+        Ok(t)
     }
 
     pub async fn generate(
@@ -358,10 +359,10 @@ impl Orchestrator {
         let mut ids = prompt_ids.to_vec();
 
         let prefill_start = std::time::Instant::now();
-        let logits = self.forward(&ids, session_id, true).await?;
+        let logits = self.forward(&ids, session_id, true, DECODE_TOP_K).await?;
         let prefill_ms = prefill_start.elapsed().as_millis();
 
-        let mut next = argmax_last_token(&logits)?;
+        let mut next = next_token(&logits)?;
         ids.push(next);
         if Some(next) == eos_id {
             return Ok(ids);
@@ -373,13 +374,13 @@ impl Orchestrator {
         let mut token_count = 0usize;
         for step in 1..max_new_tokens {
             let tok_start = std::time::Instant::now();
-            let logits = self.forward(&[next], session_id, true).await?;
+            let logits = self.forward(&[next], session_id, true, DECODE_TOP_K).await?;
             decode_total += tok_start.elapsed();
             compute_total += self.last_forward_compute_ms;
             network_total += self.last_forward_network_ms;
             token_count += 1;
 
-            next = argmax_last_token(&logits)?;
+            next = next_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
                 break;
@@ -449,8 +450,8 @@ impl Orchestrator {
     {
         let mut ids = prompt_ids.to_vec();
 
-        let logits = self.forward(&ids, session_id, true).await?;
-        let mut next = argmax_last_token(&logits)?;
+        let logits = self.forward(&ids, session_id, true, DECODE_TOP_K).await?;
+        let mut next = next_token(&logits)?;
         ids.push(next);
         on_token(next);
         if Some(next) == eos_id {
@@ -458,8 +459,8 @@ impl Orchestrator {
         }
 
         for _ in 1..max_new_tokens {
-            let logits = self.forward(&[next], session_id, true).await?;
-            next = argmax_last_token(&logits)?;
+            let logits = self.forward(&[next], session_id, true, DECODE_TOP_K).await?;
+            next = next_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
                 break;
@@ -629,7 +630,7 @@ pub async fn build_from_registry(
         stages,
         spare_endpoints,
         target_replication,
-        session_kx: KeyExchange::generate(),
+        session_kx: std::sync::Arc::new(KeyExchange::generate()),
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
     })

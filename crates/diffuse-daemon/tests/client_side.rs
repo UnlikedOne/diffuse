@@ -94,14 +94,18 @@ async fn prompt_never_leaves_client_only_activations_do() {
 
     // Client executes slice 0:2 locally -> activations. Tokens stay here.
     let local_activations = client_w
-        .run_slice(MODEL, 0, 2, "client-session", 0, input)
+        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0)
         .await
         .expect("local first-slice execution");
 
     // What leaves the client is activations (float hidden states), not tokens.
-    assert_eq!(
-        local_activations.dtype, "float32",
-        "what leaves the client must be activations, not integer tokens"
+    assert!(
+        matches!(
+            local_activations.dtype.as_str(),
+            "float32" | "float16" | "bfloat16"
+        ),
+        "what leaves the client must be activations, not integer tokens (got {})",
+        local_activations.dtype
     );
     assert_eq!(
         local_activations.shape.len(),
@@ -119,8 +123,11 @@ async fn prompt_never_leaves_client_only_activations_do() {
 
     // Client sends the ACTIVATIONS (encrypted) to the host for the rest of the model.
     let client_kx = KeyExchange::generate();
-    let logits = request_slice(
-        "http://127.0.0.1:50312",
+    let mut compute_client = diffuse_daemon::compute::connect_compute("http://127.0.0.1:50312")
+        .await
+        .expect("connect to the encrypted compute channel");
+    let (logits, _compute_ms) = request_slice(
+        &mut compute_client,
         &host_kx_public,
         &client_kx,
         MODEL,
@@ -128,6 +135,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
         full,
         "client-session",
         &local_activations,
+        0,
     )
     .await
     .expect("remote completion over encrypted channel");

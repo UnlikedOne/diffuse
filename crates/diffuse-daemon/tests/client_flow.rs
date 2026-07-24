@@ -76,6 +76,7 @@ async fn client_generates_with_network_blind_to_prompt_and_output() {
             start_layer: 2,
             end_layer: full,
         },
+        remote_client: None,
     };
 
     let out = session.generate(&ids, 10, "priv-session", Some(QWEN_EOS)).await.expect("gen");

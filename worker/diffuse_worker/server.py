@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from diffuse_worker import data_pb2, data_pb2_grpc
+from diffuse_worker.batching import BatchScheduler
 from diffuse_worker.config import WorkerConfig
 from diffuse_worker.inference import SliceRunner
 from diffuse_worker.slicing import ModelSlice
@@ -16,17 +17,39 @@ log = logging.getLogger("diffuse.worker")
 MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 
 
+TOPK_DTYPE = "topk_i64_f32"
+
+
 def tensor_to_proto(t: torch.Tensor) -> data_pb2.Tensor:
-    if t.dtype in (torch.bfloat16, torch.float16):
-        t = t.to(torch.float32)
-    arr = t.detach().cpu().numpy()
+    t = t.detach().cpu()
+    if t.dtype is torch.bfloat16:
+        return data_pb2.Tensor(
+            shape=list(t.shape),
+            dtype="bfloat16",
+            data=t.view(torch.uint16).numpy().tobytes(),
+        )
+    arr = t.numpy()
     return data_pb2.Tensor(
         shape=list(arr.shape),
         dtype=str(arr.dtype),
         data=arr.tobytes(),
     )
 
+
+def topk_to_proto(indices: torch.Tensor, values: torch.Tensor) -> data_pb2.Tensor:
+    ids = indices.detach().cpu().to(torch.int64).numpy()
+    scores = values.detach().cpu().to(torch.float32).numpy()
+    return data_pb2.Tensor(
+        shape=[int(ids.shape[0])],
+        dtype=TOPK_DTYPE,
+        data=ids.tobytes() + scores.tobytes(),
+    )
+
+
 def proto_to_tensor(p: data_pb2.Tensor) -> torch.Tensor:
+    if p.dtype == "bfloat16":
+        arr = np.frombuffer(p.data, dtype=np.uint16).reshape(tuple(p.shape))
+        return torch.from_numpy(arr.copy()).view(torch.bfloat16)
     np_dtype = np.dtype(p.dtype)
     arr = np.frombuffer(p.data, dtype=np_dtype).reshape(tuple(p.shape))
     return torch.from_numpy(arr.copy())
@@ -37,6 +60,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         self.config = config
         self.slice = ModelSlice(device=config.device)
         self.runner: SliceRunner | None = None
+        self.scheduler: BatchScheduler | None = None
         self.loaded = False
 
     def LoadSlice(self, request, context):
@@ -49,6 +73,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 cache_dir=self.config.cache_dir,
             )
             self.runner = SliceRunner(self.slice)
+            self.scheduler = (
+                BatchScheduler(self.runner, max_batch=self.config.max_batch)
+                if self.config.max_batch > 1
+                else None
+            )
             self.loaded = True
             log.info(
                 "loaded %s layers %d:%d of %d",
@@ -70,15 +99,29 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         try:
             tensor_in = proto_to_tensor(request.activations)
             is_input_ids = tensor_in.dtype == torch.int64
-            out = self.runner.run(
-                tensor_in,
-                is_input_ids=is_input_ids,
-                session_id=request.session_id,
-                use_cache=request.use_cache,
-            )
+            if self.scheduler is not None:
+                out = self.scheduler.submit(
+                    tensor_in,
+                    is_input_ids=is_input_ids,
+                    session_id=request.session_id,
+                    use_cache=request.use_cache,
+                    top_k=request.top_k,
+                )
+            else:
+                out = self.runner.run(
+                    tensor_in,
+                    is_input_ids=is_input_ids,
+                    session_id=request.session_id,
+                    use_cache=request.use_cache,
+                    top_k=request.top_k,
+                )
+            if isinstance(out, tuple):
+                payload = topk_to_proto(*out)
+            else:
+                payload = tensor_to_proto(out)
             return data_pb2.SliceResponse(
                 session_id=request.session_id,
-                activations=tensor_to_proto(out),
+                activations=payload,
                 ok=True,
             )
         except Exception as exc:
@@ -167,12 +210,15 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
 
 def serve(config: WorkerConfig | None = None) -> None:
     config = config or WorkerConfig.from_env()
+    if config.torch_threads > 0:
+        torch.set_num_threads(config.torch_threads)
     options = [
         ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
         ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+        ("grpc.so_reuseport", 0),
     ]
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=4), options=options
+        futures.ThreadPoolExecutor(max_workers=config.max_concurrency), options=options
     )
     data_pb2_grpc.add_InferenceWorkerServicer_to_server(
         InferenceWorkerServicer(config), server

@@ -16,6 +16,7 @@ message SliceRequest {
   uint64 position = 5;
   Tensor activations = 6;
   bool use_cache = 7;
+  uint32 top_k = 8;
 }
 
 message SliceResponse {

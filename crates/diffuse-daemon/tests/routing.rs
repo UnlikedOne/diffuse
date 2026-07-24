@@ -93,7 +93,7 @@ async fn orchestrator_builds_from_discovered_registry() {
     registry.upsert(peer(&w_a.endpoint(), 0, mid));
     registry.upsert(peer(&w_b.endpoint(), mid, full));
 
-    let mut orch = build_from_registry(MODEL, &registry, 2, vec![])
+    let mut orch = build_from_registry(MODEL, &registry, 2, vec![], None)
         .await
         .expect("should build orchestrator from registry");
 

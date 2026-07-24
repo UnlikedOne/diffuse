@@ -57,7 +57,7 @@ pub async fn run_demo(
         stages: vec![stage_a, stage_b],
         spare_endpoints: spares,
         target_replication: 2,
-        session_kx: KeyExchange::generate(),
+        session_kx: std::sync::Arc::new(KeyExchange::generate()),
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
     };

@@ -175,6 +175,17 @@ def _rebuild_meta_buffers(model, cfg):
                 module.register_buffer(bname, buf, persistent=False)
 
 
+def _build_kwargs(hf_token, cache_dir):
+    kwargs = {"token": hf_token, "cache_dir": cache_dir}
+    if _sdpa_available():
+        kwargs["attn_implementation"] = "sdpa"
+    return kwargs
+
+
+def _sdpa_available() -> bool:
+    return hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+
 class ModelSlice:
     def __init__(self, device: str = "cpu"):
         self.device = device
@@ -271,7 +282,10 @@ class ModelSlice:
         cache_dir,
     ):
         with torch.device("meta"):
-            model = AutoModelForCausalLM.from_config(cfg)
+            if _sdpa_available():
+                model = AutoModelForCausalLM.from_config(cfg, attn_implementation="sdpa")
+            else:
+                model = AutoModelForCausalLM.from_config(cfg)
         model.eval()
 
         parts = _resolve_backbone(model)
@@ -319,6 +333,8 @@ class ModelSlice:
                 f"buffers {leftover_buffers[:5]}"
             )
 
+        model.to(self.device)
+
         self.kind = parts["kind"]
         self.layers = kept
         self.rotary = parts["rotary"]
@@ -332,11 +348,11 @@ class ModelSlice:
     def _load_full(self, model_id, start_layer, end_layer, total, hf_token, cache_dir):
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            token=hf_token,
-            cache_dir=cache_dir,
             dtype="auto",
+            **_build_kwargs(hf_token, cache_dir),
         )
         model.eval()
+        model.to(self.device)
         parts = _resolve_backbone(model)
         self.kind = parts["kind"]
         self.layers = parts["layers"][start_layer:end_layer]
@@ -347,6 +363,9 @@ class ModelSlice:
         if end_layer == total:
             self.norm = parts["norm"]
             self.lm_head = parts["lm_head"]
+
+    def torch_device(self) -> torch.device:
+        return torch.device(self.device)
 
     def is_first(self) -> bool:
         return self.start_layer == 0

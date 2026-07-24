@@ -90,18 +90,25 @@ async fn health_sweep_detects_death_proactively() {
                 start_layer: 0,
                 end_layer: mid,
                 replicas: vec![
-                    Replica { worker: a1, alive: true },
-                    Replica { worker: a2, alive: true },
+                    Replica::Local { worker: a1, alive: true },
+                    Replica::Local { worker: a2, alive: true },
                 ],
+                last_compute_ms: 0,
+                last_network_ms: 0,
             },
             Stage {
                 start_layer: mid,
                 end_layer: full,
-                replicas: vec![Replica { worker: b1, alive: true }],
+                replicas: vec![Replica::Local { worker: b1, alive: true }],
+                last_compute_ms: 0,
+                last_network_ms: 0,
             },
         ],
         spare_endpoints: vec![],
         target_replication: 2,
+        session_kx: std::sync::Arc::new(diffuse_trust::transport::KeyExchange::generate()),
+        last_forward_compute_ms: 0,
+        last_forward_network_ms: 0,
     };
 
     orch.health_sweep().await;

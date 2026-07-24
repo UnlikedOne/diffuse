@@ -91,8 +91,11 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
     let my_kx = KeyExchange::generate();
     let input = ids_tensor(&[9707, 11, 1879]);
 
-    let out = request_slice(
-        "http://127.0.0.1:50301",
+    let mut client = diffuse_daemon::compute::connect_compute("http://127.0.0.1:50301")
+        .await
+        .expect("connect to the encrypted compute channel");
+    let (out, _compute_ms) = request_slice(
+        &mut client,
         &host_kx_public,
         &my_kx,
         MODEL,
@@ -100,6 +103,7 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
         mid,
         "enc-session",
         &input,
+        0,
     )
     .await
     .expect("encrypted delegation should succeed");

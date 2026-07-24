@@ -294,6 +294,7 @@ pub async fn relay_compute(
     end: u32,
     session_id: &str,
     activations: &crate::worker::pb::Tensor,
+    top_k: u32,
 ) -> anyhow::Result<(crate::worker::pb::Tensor, u64)> {
     use pb::ComputeRequest;
     let secret = my_kx.shared_secret(host_kx_public);
@@ -312,6 +313,7 @@ pub async fn relay_compute(
         end_layer: end,
         session_id: session_id.to_string(),
         encrypted_activations: encrypted,
+        top_k,
     };
 
     let response = client

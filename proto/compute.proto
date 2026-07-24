@@ -9,6 +9,7 @@ message ComputeRequest {
   uint32 end_layer = 4;
   string session_id = 5;
   bytes encrypted_activations = 6;
+  uint32 top_k = 7;
 }
 
 message ComputeResponse {

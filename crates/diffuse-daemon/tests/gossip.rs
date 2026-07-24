@@ -31,7 +31,7 @@ async fn two_daemons_converge_via_authenticated_gossip() {
     }
 
     let addr_b: std::net::SocketAddr = "127.0.0.1:60002".parse().unwrap();
-    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b));
+    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b), diffuse_daemon::relay::RelayState::new());
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -80,7 +80,7 @@ async fn unsigned_peer_is_rejected() {
     }
 
     let addr_b: std::net::SocketAddr = "127.0.0.1:60012".parse().unwrap();
-    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b));
+    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b), diffuse_daemon::relay::RelayState::new());
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let accepted = gossip_with("http://127.0.0.1:60012", vec![1], &reg_a)
@@ -112,7 +112,7 @@ async fn tampered_peer_is_rejected() {
     }
 
     let addr_b: std::net::SocketAddr = "127.0.0.1:60013".parse().unwrap();
-    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b));
+    let _server_b = spawn_gossip_server(addr_b, Arc::clone(&reg_b), diffuse_daemon::relay::RelayState::new());
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let accepted = gossip_with("http://127.0.0.1:60013", vec![1], &reg_a)
