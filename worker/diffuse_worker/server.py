@@ -183,6 +183,29 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             self.runner.clear_session(request.session_id)
         return data_pb2.ClearSessionResponse(ok=True)
     
+    def SearchModels(self, request, context):
+        try:
+            from diffuse_worker.catalog import search
+
+            cards = search(
+                query=request.query,
+                limit=request.limit or 40,
+                hf_token=request.hf_token or self.config.hf_token or None,
+                supported_only=request.supported_only,
+            )
+            from diffuse_worker.capacity import available_memory
+
+            available, device = available_memory()
+            return data_pb2.SearchModelsResponse(
+                ok=True,
+                models=[data_pb2.ModelCard(**card) for card in cards],
+                available_bytes=available,
+                device=device,
+            )
+        except Exception as exc:
+            log.exception("model search failed")
+            return data_pb2.SearchModelsResponse(ok=False, error=str(exc))
+
     def ProfileModel(self, request, context):
         try:
             from diffuse_worker.capacity import plan_capacity

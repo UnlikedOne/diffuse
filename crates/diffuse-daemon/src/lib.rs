@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod gossip;
 pub mod identity;
 pub mod lifecycle;
+pub mod marketplace;
 pub mod orchestrator;
 pub mod registry;
 pub mod client_flow;

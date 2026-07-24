@@ -144,6 +144,25 @@ impl WorkerHandle {
         })
     }
 
+    pub async fn search_models(
+        &mut self,
+        query: &str,
+        limit: u32,
+        supported_only: bool,
+    ) -> anyhow::Result<(Vec<pb::ModelCard>, u64, String)> {
+        let request = tonic::Request::new(pb::SearchModelsRequest {
+            query: query.to_string(),
+            limit,
+            hf_token: String::new(),
+            supported_only,
+        });
+        let response = self.client.search_models(request).await?.into_inner();
+        if !response.ok {
+            anyhow::bail!("model search failed: {}", response.error);
+        }
+        Ok((response.models, response.available_bytes, response.device))
+    }
+
     pub async fn encode_messages(
         &mut self,
         messages: Vec<(String, String)>,

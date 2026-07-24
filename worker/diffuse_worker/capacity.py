@@ -70,6 +70,13 @@ def gpu_memory_bytes() -> tuple[int, str] | None:
     return None
 
 
+def available_memory() -> tuple[int, str]:
+    gpu = gpu_memory_bytes()
+    if gpu is not None:
+        return gpu
+    return available_memory_bytes(), "cpu"
+
+
 def plan_capacity(
     model_id: str,
     overhead_fraction: float,

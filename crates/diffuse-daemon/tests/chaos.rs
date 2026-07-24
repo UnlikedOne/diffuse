@@ -121,15 +121,29 @@ async fn generation_survives_dead_replica() {
         .await
         .expect("encode");
 
-    w_a1.kill();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let out = orch
-        .generate(&ids, 20, "chaos-session", Some(QWEN_EOS))
+    let reference = orch
+        .generate(&ids, 20, "reference-session", Some(QWEN_EOS))
         .await
-        .expect("generation should survive one dead replica");
+        .expect("reference generation with every replica alive");
+
+    let mut produced = 0usize;
+    let out = orch
+        .generate_streaming(&ids, 20, "chaos-session", Some(QWEN_EOS), |_tok| {
+            produced += 1;
+            if produced == 5 {
+                w_a1.kill();
+            }
+        })
+        .await
+        .expect("generation should survive a replica dying mid-session");
 
     assert!(out.len() > ids.len(), "should have generated new tokens");
+
+    assert_eq!(
+        out, reference,
+        "a replica dying mid-session must not change the tokens: the standby holds no KV cache \
+         for the session, so the prefix has to be replayed rather than silently continued"
+    );
 
     let text = orch
         .decode_via_any(&out[ids.len()..], true)

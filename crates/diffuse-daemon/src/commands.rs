@@ -131,7 +131,7 @@ pub async fn demo(
 }
 
 pub async fn host(
-    model: &str,
+    model: Option<&str>,
     worker_endpoint: &str,
     listen: &str,
     bootstrap_sentinels: &[String],
@@ -167,14 +167,6 @@ pub async fn host(
         connect_worker(worker_endpoint, Duration::from_secs(30)).await?
     };
 
-    let profile = worker.profile_model(model, overhead).await?;
-    println!(
-        "  {} machine holds up to {} layers of {}",
-        "→".bright_blue(),
-        profile.max_layers.to_string().bright_green().bold(),
-        model.bright_white()
-    );
-
     let registry = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
     let sentinels = crate::config::resolve_sentinels(bootstrap_sentinels);
     if !sentinels.is_empty() {
@@ -183,6 +175,29 @@ pub async fn host(
     }
 
     let caps = { analyze(&*registry.lock().await) };
+
+    let model = match model {
+        Some(m) => m.to_string(),
+        None => loop {
+            let Some(picked) = crate::marketplace::browse(&mut worker, &caps).await? else {
+                println!();
+                crate::tui::note("no model selected, nothing to host");
+                return Ok(());
+            };
+            if crate::marketplace::confirm_selection(&mut worker, &picked, overhead, &caps).await? {
+                break picked;
+            }
+        },
+    };
+    let model = model.as_str();
+
+    let profile = worker.profile_model(model, overhead).await?;
+    println!(
+        "  {} machine holds up to {} layers of {}",
+        "→".bright_blue(),
+        profile.max_layers.to_string().bright_green().bold(),
+        model.bright_white()
+    );
     let assignment = assign_slice(&caps, model, profile.total_layers, profile.max_layers, 2)
         .ok_or_else(|| anyhow::anyhow!("machine too small to hold any slice of {}", model))?;
 

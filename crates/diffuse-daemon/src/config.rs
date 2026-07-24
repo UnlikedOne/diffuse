@@ -51,8 +51,9 @@ pub enum Command {
     },
     /// Join the network: profile, pick a slice, load it, announce, and serve
     Host {
+        /// Model to host. Omit to browse the marketplace and pick one.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:50051")]
         worker: String,
         #[arg(long, default_value = "0.0.0.0:9440")]

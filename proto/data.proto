@@ -95,6 +95,33 @@ message ProfileResponse {
   string device = 9;
 }
 
+message ModelCard {
+  string id = 1;
+  string architecture = 2;
+  string model_type = 3;
+  uint64 params = 4;
+  uint64 downloads = 5;
+  uint64 likes = 6;
+  bool gated = 7;
+  string support = 8;
+  string note = 9;
+}
+
+message SearchModelsRequest {
+  string query = 1;
+  uint32 limit = 2;
+  string hf_token = 3;
+  bool supported_only = 4;
+}
+
+message SearchModelsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated ModelCard models = 3;
+  uint64 available_bytes = 4;
+  string device = 5;
+}
+
 message ClearSessionRequest {
   string session_id = 1;
 }
@@ -111,4 +138,5 @@ service InferenceWorker {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc ProfileModel(ProfileRequest) returns (ProfileResponse);
   rpc ClearSession(ClearSessionRequest) returns (ClearSessionResponse);
+  rpc SearchModels(SearchModelsRequest) returns (SearchModelsResponse);
 }

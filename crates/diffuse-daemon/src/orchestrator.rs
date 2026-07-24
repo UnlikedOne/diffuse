@@ -74,13 +74,13 @@ pub const DECODE_TOP_K: u32 = 8;
 const TOPK_DTYPE: &str = "topk_i64_f32";
 
 #[derive(Debug, thiserror::Error)]
-#[error("the forwarding chain broke at {endpoint}, session state on the nodes before it has already advanced")]
-pub struct ChainBroken {
+#[error("the route broke at {endpoint}; the session must be replayed because the surviving replicas hold no KV cache for it")]
+pub struct RouteBroken {
     pub endpoint: String,
 }
 
-pub fn chain_broken(err: &anyhow::Error) -> Option<&ChainBroken> {
-    err.downcast_ref::<ChainBroken>()
+pub fn route_broken(err: &anyhow::Error) -> Option<&RouteBroken> {
+    err.downcast_ref::<RouteBroken>()
 }
 
 fn stalled_endpoint(err: &anyhow::Error) -> Option<String> {
@@ -221,14 +221,20 @@ impl Stage {
                     return Ok(out);
                 }
                 Err(e) => {
+                    let label = self.replicas[idx].label();
+                    self.replicas[idx].set_dead();
+                    if use_cache {
+                        tracing::warn!(
+                            "replica {} for slice {}:{} failed ({}); a standby replica holds no KV cache for this session, so the prefix must be replayed",
+                            label, start, end, e
+                        );
+                        return Err(anyhow::Error::new(RouteBroken { endpoint: label })
+                            .context(format!("slice {}:{}", start, end)));
+                    }
                     tracing::warn!(
                         "replica {} for slice {}:{} failed ({}), marking dead, trying next",
-                        self.replicas[idx].label(),
-                        start,
-                        end,
-                        e
+                        label, start, end, e
                     );
-                    self.replicas[idx].set_dead();
                 }
             }
         }
@@ -440,7 +446,7 @@ impl Orchestrator {
             Err(e) => {
                 let endpoint = stalled_endpoint(&e).unwrap_or_else(|| head_hop.compute_endpoint.clone());
                 self.mark_dead_by_endpoint(&endpoint);
-                Err(anyhow::Error::new(ChainBroken { endpoint }).context(e.to_string()))
+                Err(anyhow::Error::new(RouteBroken { endpoint }).context(e.to_string()))
             }
         }
     }
@@ -501,19 +507,26 @@ impl Orchestrator {
         session_id: &str,
         top_k: u32,
     ) -> anyhow::Result<Tensor> {
-        match self.forward(step_ids, session_id, true, top_k).await {
-            Ok(out) => Ok(out),
-            Err(e) if chain_broken(&e).is_some() => {
-                tracing::warn!(
-                    "{:#}; falling back to per-stage routing and replaying {} tokens",
-                    e,
-                    full_ids.len()
-                );
-                self.chain_enabled = false;
-                self.clear_session(session_id).await;
-                self.forward(full_ids, session_id, true, top_k).await
+        const MAX_REPLAYS: usize = 3;
+        let mut replays = 0;
+        let mut ids = step_ids;
+        loop {
+            match self.forward(ids, session_id, true, top_k).await {
+                Ok(out) => return Ok(out),
+                Err(e) if route_broken(&e).is_some() && replays < MAX_REPLAYS => {
+                    replays += 1;
+                    tracing::warn!(
+                        "{:#}; replaying {} tokens on the surviving replicas (attempt {}/{})",
+                        e,
+                        full_ids.len(),
+                        replays,
+                        MAX_REPLAYS
+                    );
+                    self.clear_session(session_id).await;
+                    ids = full_ids;
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => Err(e),
         }
     }
 
