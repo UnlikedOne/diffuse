@@ -109,6 +109,7 @@ async fn health_sweep_detects_death_proactively() {
         session_kx: std::sync::Arc::new(diffuse_trust::transport::KeyExchange::generate()),
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
+        chain_enabled: false,
     };
 
     orch.health_sweep().await;

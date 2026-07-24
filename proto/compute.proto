@@ -2,6 +2,14 @@ syntax = "proto3";
 
 package diffuse.compute;
 
+message Hop {
+  string compute_endpoint = 1;
+  bytes kx_public = 2;
+  uint32 start_layer = 3;
+  uint32 end_layer = 4;
+  uint32 top_k = 5;
+}
+
 message ComputeRequest {
   bytes requester_kx_public = 1;
   string model_id = 2;
@@ -10,6 +18,7 @@ message ComputeRequest {
   string session_id = 5;
   bytes encrypted_activations = 6;
   uint32 top_k = 7;
+  repeated Hop route = 8;
 }
 
 message ComputeResponse {

@@ -314,6 +314,7 @@ pub async fn relay_compute(
         session_id: session_id.to_string(),
         encrypted_activations: encrypted,
         top_k,
+        route: Vec::new(),
     };
 
     let response = client

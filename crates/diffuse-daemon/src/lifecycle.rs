@@ -58,6 +58,7 @@ pub async fn run_demo(
         spare_endpoints: spares,
         target_replication: 2,
         session_kx: std::sync::Arc::new(KeyExchange::generate()),
+        chain_enabled: true,
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
     };

@@ -97,10 +97,41 @@ pub fn bytes_to_tensor_pub(b: &[u8]) -> anyhow::Result<Tensor> {
     bytes_to_tensor(b)
 }
 
+#[derive(Clone, Default)]
+pub struct HopClients {
+    clients: Arc<Mutex<std::collections::HashMap<String, ComputeClient<tonic::transport::Channel>>>>,
+}
+
+impl HopClients {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn get(
+        &self,
+        endpoint: &str,
+    ) -> anyhow::Result<ComputeClient<tonic::transport::Channel>> {
+        if let Some(client) = self.clients.lock().await.get(endpoint) {
+            return Ok(client.clone());
+        }
+        let client = connect_compute(endpoint).await?;
+        self.clients
+            .lock()
+            .await
+            .insert(endpoint.to_string(), client.clone());
+        Ok(client)
+    }
+
+    pub async fn forget(&self, endpoint: &str) {
+        self.clients.lock().await.remove(endpoint);
+    }
+}
+
 pub struct ComputeService {
     pub identity_kx: Arc<KeyExchange>,
     pub worker: Arc<Mutex<WorkerHandle>>,
     pub model_id: String,
+    pub hops: HopClients,
 }
 
 #[tonic::async_trait]
@@ -110,7 +141,7 @@ impl Compute for ComputeService {
         request: Request<ComputeRequest>,
     ) -> Result<Response<ComputeResponse>, Status> {
         let req = request.into_inner();
-        let resp = process_compute_request(&self.identity_kx, &self.worker, &req)
+        let resp = process_chained_request(&self.identity_kx, &self.worker, &req, &self.hops)
             .await
             .map_err(|e| Status::internal(format!("compute failed: {}", e)))?;
         Ok(Response::new(resp))
@@ -160,11 +191,48 @@ pub async fn request_slice(
             session_id: session_id.to_string(),
             encrypted_activations: encrypted,
             top_k,
+            route: Vec::new(),
         })
         .await?
         .into_inner();
     if !response.ok {
         anyhow::bail!("remote compute failed: {}", response.error);
+    }
+    let plain_out = decrypt(&secret, &response.encrypted_activations)?;
+    let tensor = bytes_to_tensor(&plain_out)?;
+    Ok((tensor, response.compute_ms))
+}
+
+pub async fn request_slice_chained(
+    client: &mut ComputeClient<tonic::transport::Channel>,
+    host_kx_public: &[u8; 32],
+    my_kx: &KeyExchange,
+    model_id: &str,
+    start: u32,
+    end: u32,
+    session_id: &str,
+    activations: &Tensor,
+    top_k: u32,
+    route: Vec<pb::Hop>,
+) -> anyhow::Result<(Tensor, u64)> {
+    let secret = my_kx.shared_secret(host_kx_public);
+    let plain = tensor_to_bytes(activations);
+    let encrypted = encrypt(&secret, &plain)?;
+    let response = client
+        .run_slice(ComputeRequest {
+            requester_kx_public: my_kx.public_bytes().to_vec(),
+            model_id: model_id.to_string(),
+            start_layer: start,
+            end_layer: end,
+            session_id: session_id.to_string(),
+            encrypted_activations: encrypted,
+            top_k,
+            route,
+        })
+        .await?
+        .into_inner();
+    if !response.ok {
+        anyhow::bail!("chained compute failed: {}", response.error);
     }
     let plain_out = decrypt(&secret, &response.encrypted_activations)?;
     let tensor = bytes_to_tensor(&plain_out)?;
@@ -182,6 +250,7 @@ pub fn spawn_compute_server(
             identity_kx,
             worker,
             model_id,
+            hops: HopClients::new(),
         };
         let server = tonic::transport::Server::builder()
             .add_service(
@@ -229,6 +298,92 @@ pub async fn process_compute_request(
     let encrypted = encrypt(&secret, &out_bytes)?;
     Ok(ComputeResponse {
         encrypted_activations: encrypted,
+        ok: true,
+        error: String::new(),
+        compute_ms,
+    })
+}
+
+pub async fn process_chained_request(
+    identity_kx: &KeyExchange,
+    worker: &Arc<Mutex<WorkerHandle>>,
+    req: &ComputeRequest,
+    hops: &HopClients,
+) -> anyhow::Result<ComputeResponse> {
+    let peer_kx: [u8; 32] = req
+        .requester_kx_public
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("bad kx public key"))?;
+    let secret = identity_kx.shared_secret(&peer_kx);
+    let plain = decrypt(&secret, &req.encrypted_activations)?;
+    let tensor = bytes_to_tensor(&plain)?;
+
+    let compute_start = std::time::Instant::now();
+    let out = {
+        let mut w = worker.lock().await.clone();
+        w.run_slice(
+            &req.model_id,
+            req.start_layer,
+            req.end_layer,
+            &req.session_id,
+            0,
+            tensor,
+            true,
+            req.top_k,
+        )
+        .await?
+    };
+    let mut compute_ms = compute_start.elapsed().as_millis() as u64;
+
+    let payload = if req.route.is_empty() {
+        tensor_to_bytes(&out)
+    } else {
+        let next = &req.route[0];
+        let next_kx: [u8; 32] = next
+            .kx_public
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("hop {} has a bad kx public key", next.compute_endpoint))?;
+        let next_secret = identity_kx.shared_secret(&next_kx);
+        let forwarded = encrypt(&next_secret, &tensor_to_bytes(&out))?;
+
+        let mut client = hops.get(&next.compute_endpoint).await.map_err(|e| {
+            anyhow::anyhow!("chain stalled at [{}]: {}", next.compute_endpoint, e)
+        })?;
+        let downstream = client
+            .run_slice(ComputeRequest {
+                requester_kx_public: identity_kx.public_bytes().to_vec(),
+                model_id: req.model_id.clone(),
+                start_layer: next.start_layer,
+                end_layer: next.end_layer,
+                session_id: req.session_id.clone(),
+                encrypted_activations: forwarded,
+                top_k: next.top_k,
+                route: req.route[1..].to_vec(),
+            })
+            .await;
+
+        let downstream = match downstream {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                hops.forget(&next.compute_endpoint).await;
+                anyhow::bail!("chain stalled at [{}]: {}", next.compute_endpoint, e);
+            }
+        };
+        if !downstream.ok {
+            anyhow::bail!(
+                "chain stalled at [{}]: {}",
+                next.compute_endpoint,
+                downstream.error
+            );
+        }
+        compute_ms += downstream.compute_ms;
+        decrypt(&next_secret, &downstream.encrypted_activations)?
+    };
+
+    Ok(ComputeResponse {
+        encrypted_activations: encrypt(&secret, &payload)?,
         ok: true,
         error: String::new(),
         compute_ms,

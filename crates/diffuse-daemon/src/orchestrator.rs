@@ -66,11 +66,30 @@ pub struct Orchestrator {
     pub session_kx: std::sync::Arc<KeyExchange>,
     pub last_forward_compute_ms: u64,
     pub last_forward_network_ms: u64,
+    pub chain_enabled: bool,
 }
 
 pub const DECODE_TOP_K: u32 = 8;
 
 const TOPK_DTYPE: &str = "topk_i64_f32";
+
+#[derive(Debug, thiserror::Error)]
+#[error("the forwarding chain broke at {endpoint}, session state on the nodes before it has already advanced")]
+pub struct ChainBroken {
+    pub endpoint: String,
+}
+
+pub fn chain_broken(err: &anyhow::Error) -> Option<&ChainBroken> {
+    err.downcast_ref::<ChainBroken>()
+}
+
+fn stalled_endpoint(err: &anyhow::Error) -> Option<String> {
+    let text = format!("{:#}", err);
+    let start = text.find("chain stalled at [")? + "chain stalled at [".len();
+    let rest = &text[start..];
+    let end = rest.find(']')?;
+    Some(rest[..end].to_string())
+}
 
 fn ids_to_tensor(ids: &[i64]) -> Tensor {
     let mut data = Vec::with_capacity(ids.len() * 8);
@@ -322,6 +341,125 @@ impl Orchestrator {
         repaired
     }
 
+    fn build_route(&self, top_k: u32) -> Option<Vec<(usize, crate::compute::pb::Hop)>> {
+        let last = self.stages.len().saturating_sub(1);
+        let mut hops = Vec::with_capacity(self.stages.len());
+        for (i, stage) in self.stages.iter().enumerate() {
+            let idx = stage.replicas.iter().position(|r| {
+                r.is_alive() && matches!(r, Replica::Remote { .. })
+            })?;
+            let Replica::Remote {
+                compute_endpoint,
+                host_kx_public,
+                ..
+            } = &stage.replicas[idx]
+            else {
+                return None;
+            };
+            hops.push((
+                idx,
+                crate::compute::pb::Hop {
+                    compute_endpoint: compute_endpoint.clone(),
+                    kx_public: host_kx_public.to_vec(),
+                    start_layer: stage.start_layer,
+                    end_layer: stage.end_layer,
+                    top_k: if i == last { top_k } else { 0 },
+                },
+            ));
+        }
+        Some(hops)
+    }
+
+    async fn forward_chained(
+        &mut self,
+        input: &Tensor,
+        session_id: &str,
+        top_k: u32,
+    ) -> anyhow::Result<Option<Tensor>> {
+        if self.stages.len() < 2 {
+            return Ok(None);
+        }
+        let Some(route) = self.build_route(top_k) else {
+            return Ok(None);
+        };
+
+        let head_idx = route[0].0;
+        let head_hop = route[0].1.clone();
+        let rest: Vec<_> = route[1..].iter().map(|(_, hop)| hop.clone()).collect();
+        let head_kx: [u8; 32] = match head_hop.kx_public.as_slice().try_into() {
+            Ok(k) => k,
+            Err(_) => return Ok(None),
+        };
+
+        let model_id = self.model_id.clone();
+        let session_kx = self.session_kx.clone();
+        let start = std::time::Instant::now();
+
+        let Replica::Remote {
+            compute_endpoint,
+            client,
+            ..
+        } = &mut self.stages[0].replicas[head_idx]
+        else {
+            return Ok(None);
+        };
+        if client.is_none() {
+            *client = crate::compute::connect_compute(compute_endpoint).await.ok();
+        }
+        let Some(head_client) = client else {
+            return Ok(None);
+        };
+
+        let outcome = crate::compute::request_slice_chained(
+            head_client,
+            &head_kx,
+            &session_kx,
+            &model_id,
+            head_hop.start_layer,
+            head_hop.end_layer,
+            session_id,
+            input,
+            head_hop.top_k,
+            rest,
+        )
+        .await;
+
+        match outcome {
+            Ok((out, compute_ms)) => {
+                let elapsed = start.elapsed().as_millis() as u64;
+                self.last_forward_compute_ms = compute_ms;
+                self.last_forward_network_ms = elapsed.saturating_sub(compute_ms);
+                tracing::debug!(
+                    "chained forward over {} stages: {}ms total, {}ms compute",
+                    self.stages.len(),
+                    elapsed,
+                    compute_ms
+                );
+                Ok(Some(out))
+            }
+            Err(e) => {
+                let endpoint = stalled_endpoint(&e).unwrap_or_else(|| head_hop.compute_endpoint.clone());
+                self.mark_dead_by_endpoint(&endpoint);
+                Err(anyhow::Error::new(ChainBroken { endpoint }).context(e.to_string()))
+            }
+        }
+    }
+
+    fn mark_dead_by_endpoint(&mut self, endpoint: &str) {
+        for stage in self.stages.iter_mut() {
+            for replica in stage.replicas.iter_mut() {
+                if let Replica::Remote {
+                    compute_endpoint, ..
+                } = replica
+                {
+                    if compute_endpoint == endpoint {
+                        replica.set_dead();
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn forward(
         &mut self,
         ids: &[i64],
@@ -329,6 +467,14 @@ impl Orchestrator {
         use_cache: bool,
         top_k: u32,
     ) -> anyhow::Result<Tensor> {
+        if self.chain_enabled && use_cache {
+            let input = ids_to_tensor(ids);
+            match self.forward_chained(&input, session_id, top_k).await {
+                Ok(Some(out)) => return Ok(out),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
         let model_id = self.model_id.clone();
         let session_kx = self.session_kx.clone();
         let last_stage = self.stages.len().saturating_sub(1);
@@ -348,6 +494,29 @@ impl Orchestrator {
         Ok(t)
     }
 
+    async fn forward_step(
+        &mut self,
+        step_ids: &[i64],
+        full_ids: &[i64],
+        session_id: &str,
+        top_k: u32,
+    ) -> anyhow::Result<Tensor> {
+        match self.forward(step_ids, session_id, true, top_k).await {
+            Ok(out) => Ok(out),
+            Err(e) if chain_broken(&e).is_some() => {
+                tracing::warn!(
+                    "{:#}; falling back to per-stage routing and replaying {} tokens",
+                    e,
+                    full_ids.len()
+                );
+                self.chain_enabled = false;
+                self.clear_session(session_id).await;
+                self.forward(full_ids, session_id, true, top_k).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn generate(
         &mut self,
         prompt_ids: &[i64],
@@ -359,7 +528,9 @@ impl Orchestrator {
         let mut ids = prompt_ids.to_vec();
 
         let prefill_start = std::time::Instant::now();
-        let logits = self.forward(&ids, session_id, true, DECODE_TOP_K).await?;
+        let logits = self
+            .forward_step(&ids, &ids, session_id, DECODE_TOP_K)
+            .await?;
         let prefill_ms = prefill_start.elapsed().as_millis();
 
         let mut next = next_token(&logits)?;
@@ -374,7 +545,9 @@ impl Orchestrator {
         let mut token_count = 0usize;
         for step in 1..max_new_tokens {
             let tok_start = std::time::Instant::now();
-            let logits = self.forward(&[next], session_id, true, DECODE_TOP_K).await?;
+            let logits = self
+                .forward_step(&[next], &ids, session_id, DECODE_TOP_K)
+                .await?;
             decode_total += tok_start.elapsed();
             compute_total += self.last_forward_compute_ms;
             network_total += self.last_forward_network_ms;
@@ -450,7 +623,9 @@ impl Orchestrator {
     {
         let mut ids = prompt_ids.to_vec();
 
-        let logits = self.forward(&ids, session_id, true, DECODE_TOP_K).await?;
+        let logits = self
+            .forward_step(&ids, &ids, session_id, DECODE_TOP_K)
+            .await?;
         let mut next = next_token(&logits)?;
         ids.push(next);
         on_token(next);
@@ -459,7 +634,9 @@ impl Orchestrator {
         }
 
         for _ in 1..max_new_tokens {
-            let logits = self.forward(&[next], session_id, true, DECODE_TOP_K).await?;
+            let logits = self
+                .forward_step(&[next], &ids, session_id, DECODE_TOP_K)
+                .await?;
             next = next_token(&logits)?;
             ids.push(next);
             if Some(next) == eos_id {
@@ -633,6 +810,7 @@ pub async fn build_from_registry(
         session_kx: std::sync::Arc::new(KeyExchange::generate()),
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
+        chain_enabled: true,
     })
 }
 
