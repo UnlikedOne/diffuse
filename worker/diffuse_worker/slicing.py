@@ -9,6 +9,98 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 _LAYER_RE = re.compile(r"\.(?:layers|h|blocks|block)\.(\d+)\.")
 
+# A multimodal checkpoint carries an encoder tower (vision, audio) and a
+# projector alongside the language stack. The tower numbers its own blocks, so
+# it has to be recognised before the layer regex ever runs, or those blocks
+# would be mistaken for decoder layers and sliced apart.
+_TOWER_MARKERS = (
+    "vision_model",
+    "vision_tower",
+    "visual",
+    "audio_tower",
+    "audio_model",
+    "image_encoder",
+    "connector",
+    "multi_modal_projector",
+    "mm_projector",
+    "modality_projection",
+    "merger",
+    "perceiver",
+)
+
+_TEXT_MODULE_NAMES = ("language_model", "text_model", "model", "transformer")
+
+
+def text_config(cfg):
+    """The sub-config describing the decoder stack Diffuse slices.
+
+    Multimodal checkpoints keep the language model under `text_config` and
+    expose nothing at the root, so reading `num_hidden_layers` off the top
+    level raises on every one of them."""
+    return getattr(cfg, "text_config", None) or cfg
+
+
+def layer_count(cfg):
+    inner = text_config(cfg)
+    return getattr(inner, "num_hidden_layers", None) or getattr(inner, "n_layer", None)
+
+
+def is_multimodal(cfg) -> bool:
+    return any(
+        getattr(cfg, attr, None) is not None
+        for attr in ("vision_config", "audio_config", "video_config")
+    )
+
+
+def model_class_for(cfg):
+    """The class that can build this checkpoint.
+
+    AutoModelForCausalLM covers text-only models but rejects every multimodal
+    config. Rather than maintain a mapping of auto classes per modality, take
+    the class the checkpoint names for itself, which works for image, audio and
+    video alike."""
+    import transformers
+
+    for arch in getattr(cfg, "architectures", None) or []:
+        klass = getattr(transformers, arch, None)
+        if klass is not None:
+            return klass
+    for fallback in (
+        "AutoModelForImageTextToText",
+        "AutoModelForVision2Seq",
+        "AutoModelForSpeechSeq2Seq",
+    ):
+        klass = getattr(transformers, fallback, None)
+        if klass is None:
+            continue
+        try:
+            if type(cfg) in klass._model_mapping:
+                return klass
+        except Exception:
+            continue
+    return AutoModelForCausalLM
+
+
+def _build_empty(klass, cfg):
+    """An unmaterialised model, however the class prefers to be built.
+
+    `from_config` only exists on the Auto classes; the concrete multimodal
+    classes are constructed directly. Without this the partial loader falls
+    over and every node downloads the whole checkpoint."""
+    if _sdpa_available():
+        try:
+            cfg._attn_implementation = "sdpa"
+        except Exception:
+            pass
+    if hasattr(klass, "from_config"):
+        return klass.from_config(cfg)
+    return klass(cfg)
+
+
+def _is_tower_tensor(name: str) -> bool:
+    lowered = name.lower()
+    return any(marker in lowered for marker in _TOWER_MARKERS)
+
 
 @dataclass
 class LoadedSlice:
@@ -65,13 +157,50 @@ def _find_position_embeddings(backbone, input_embed):
     return None
 
 
+def _find_text_module(model, expected: int):
+    """The module that owns the decoder stack.
+
+    Scoping matters on multimodal models: the final norm and the rotary
+    embedding must come from the language model, not from the vision tower,
+    which carries modules of the same names and shapes."""
+    for name in _TEXT_MODULE_NAMES:
+        child = getattr(model, name, None)
+        if child is None or _is_tower_tensor(name):
+            continue
+        if _find_layer_list(child, expected) is not None:
+            deeper = _find_text_module(child, expected)
+            return deeper if deeper is not None else child
+    for name, child in model.named_children():
+        if _is_tower_tensor(name):
+            continue
+        if _find_layer_list(child, expected) is not None:
+            deeper = _find_text_module(child, expected)
+            return deeper if deeper is not None else child
+    return None
+
+
+def _find_tower(model):
+    """Encoder tower and projector, whatever the modality."""
+    modules = {}
+    for name, child in model.named_children():
+        if _is_tower_tensor(name):
+            modules[name] = child
+    inner = getattr(model, "model", None)
+    if inner is not None:
+        for name, child in inner.named_children():
+            if _is_tower_tensor(name):
+                modules.setdefault(name, child)
+    return modules
+
+
 def _resolve_backbone(model):
     cfg = model.config
-    total = getattr(cfg, "num_hidden_layers", None) or getattr(cfg, "n_layer", None)
+    total = layer_count(cfg)
     if total is None:
         raise ValueError("cannot determine layer count from config")
 
-    backbone = getattr(model, "base_model", None) or model
+    scoped = _find_text_module(model, total)
+    backbone = scoped or getattr(model, "base_model", None) or model
     found = _find_layer_list(backbone, total) or _find_layer_list(model, total)
     if found is None:
         raise ValueError(
@@ -98,6 +227,7 @@ def _resolve_backbone(model):
         "norm": _find_final_norm(backbone, layers_attr),
         "lm_head": lm_head,
         "backbone": backbone,
+        "tower": _find_tower(model),
     }
 
 
@@ -106,6 +236,11 @@ def _is_embedding_tensor(name: str) -> bool:
 
 
 def _tensor_is_needed(name, start_layer, end_layer, total, tied=False):
+    # The tower rides with the slice holding the embeddings, since that is where
+    # media becomes hidden states. Checked before the layer regex, which its own
+    # numbered blocks would otherwise match.
+    if _is_tower_tensor(name):
+        return start_layer == 0
     m = _LAYER_RE.search(name)
     if m:
         idx = int(m.group(1))
@@ -130,6 +265,8 @@ def _plan_download(model_id, start_layer, end_layer, total, hf_token, tied=False
 
 
 def _remap_key(name: str, start_layer: int) -> str:
+    if _is_tower_tensor(name):
+        return name
     m = _LAYER_RE.search(name)
     if not m:
         return name
@@ -141,6 +278,8 @@ def _detach_unused_modules(model, parts, start_layer, end_layer, total):
     if start_layer != 0:
         unused.append(parts.get("embed"))
         unused.append(parts.get("pos_embed"))
+        # A middle or tail slice never sees media, so the tower is dead weight.
+        unused.extend((parts.get("tower") or {}).values())
     if end_layer != total:
         unused.append(parts.get("norm"))
         unused.append(parts.get("lm_head"))
@@ -162,7 +301,16 @@ def _rebuild_meta_buffers(model, cfg):
         if not stale:
             continue
         rebuilt = None
-        for attempt in (lambda: type(module)(config=cfg), lambda: type(module)(cfg)):
+        # On a multimodal checkpoint the rotary buffers belong to the language
+        # model, so they have to be rebuilt from the text sub-config; the root
+        # config describes the wrapper and does not carry the right fields.
+        inner = text_config(cfg)
+        for attempt in (
+            lambda: type(module)(config=inner),
+            lambda: type(module)(inner),
+            lambda: type(module)(config=cfg),
+            lambda: type(module)(cfg),
+        ):
             try:
                 rebuilt = attempt()
                 break
@@ -201,6 +349,10 @@ class ModelSlice:
         self.layers = None
         self.norm = None
         self.lm_head = None
+        self.tower = {}
+        self.processor = None
+        self.multimodal = False
+        self.model = None
 
     def load(
         self,
@@ -211,16 +363,17 @@ class ModelSlice:
         cache_dir: str | None = None,
     ) -> LoadedSlice:
         cfg = AutoConfig.from_pretrained(model_id, token=hf_token, cache_dir=cache_dir)
-        total = getattr(cfg, "num_hidden_layers", None) or getattr(cfg, "n_layer")
+        total = layer_count(cfg)
+        if total is None:
+            raise ValueError(f"cannot determine the layer count of {model_id}")
+        self.multimodal = is_multimodal(cfg)
 
         if start_layer == 0 and end_layer == 0:
             self.model_id = model_id
             self.start_layer = 0
             self.end_layer = 0
             self.total_layers = total
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, token=hf_token, cache_dir=cache_dir
-            )
+            self._load_frontend(model_id, hf_token, cache_dir)
             return LoadedSlice(model_id, 0, 0, total)
 
         if end_layer > total:
@@ -259,15 +412,32 @@ class ModelSlice:
             )
 
         if start_layer == 0:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, token=hf_token, cache_dir=cache_dir
-            )
+            self._load_frontend(model_id, hf_token, cache_dir)
 
         self.model_id = model_id
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.total_layers = total
         return LoadedSlice(model_id, start_layer, end_layer, total)
+
+    def _load_frontend(self, model_id, hf_token, cache_dir):
+        """Tokenizer, plus the processor when the model takes media.
+
+        The processor is what turns an image, an audio clip or a video into the
+        placeholder tokens and pixel or feature tensors the tower expects."""
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id, token=hf_token, cache_dir=cache_dir
+        )
+        if not self.multimodal:
+            return
+        try:
+            from transformers import AutoProcessor
+
+            self.processor = AutoProcessor.from_pretrained(
+                model_id, token=hf_token, cache_dir=cache_dir
+            )
+        except Exception as exc:
+            print(f"no processor available for {model_id} ({exc}), text only")
 
     def _load_partial(
         self,
@@ -281,11 +451,9 @@ class ModelSlice:
         hf_token,
         cache_dir,
     ):
+        klass = model_class_for(cfg)
         with torch.device("meta"):
-            if _sdpa_available():
-                model = AutoModelForCausalLM.from_config(cfg, attn_implementation="sdpa")
-            else:
-                model = AutoModelForCausalLM.from_config(cfg)
+            model = _build_empty(klass, cfg)
         model.eval()
 
         parts = _resolve_backbone(model)
@@ -341,12 +509,15 @@ class ModelSlice:
         if start_layer == 0:
             self.embed_tokens = parts["embed"]
             self.pos_embed = parts["pos_embed"]
+            self.tower = parts.get("tower") or {}
+            self.model = model
         if end_layer == total:
             self.norm = parts["norm"]
             self.lm_head = parts["lm_head"]
 
     def _load_full(self, model_id, start_layer, end_layer, total, hf_token, cache_dir):
-        model = AutoModelForCausalLM.from_pretrained(
+        cfg = AutoConfig.from_pretrained(model_id, token=hf_token, cache_dir=cache_dir)
+        model = model_class_for(cfg).from_pretrained(
             model_id,
             dtype="auto",
             **_build_kwargs(hf_token, cache_dir),
@@ -360,6 +531,8 @@ class ModelSlice:
         if start_layer == 0:
             self.embed_tokens = parts["embed"]
             self.pos_embed = parts["pos_embed"]
+            self.tower = parts.get("tower") or {}
+            self.model = model
         if end_layer == total:
             self.norm = parts["norm"]
             self.lm_head = parts["lm_head"]

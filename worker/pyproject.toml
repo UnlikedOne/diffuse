@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Multimodal checkpoints need their processor: torchvision for image and video
+# pixel pipelines, soundfile and librosa for audio feature extraction.
+multimodal = [
+    "torchvision>=0.17",
+    "soundfile>=0.12",
+    "librosa>=0.10",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

@@ -96,6 +96,27 @@ message ProfileResponse {
   string device = 9;
 }
 
+message MediaAttachment {
+  string kind = 1;
+  bytes data = 2;
+  string mime = 3;
+}
+
+message EmbedMediaRequest {
+  string text = 1;
+  repeated ChatMessage messages = 2;
+  repeated MediaAttachment media = 3;
+  bool apply_chat_template = 4;
+  bool accepts_bf16 = 5;
+}
+
+message EmbedMediaResponse {
+  bool ok = 1;
+  string error = 2;
+  Tensor embeddings = 3;
+  uint32 token_count = 4;
+}
+
 message ModelCard {
   string id = 1;
   string architecture = 2;
@@ -140,4 +161,5 @@ service InferenceWorker {
   rpc ProfileModel(ProfileRequest) returns (ProfileResponse);
   rpc ClearSession(ClearSessionRequest) returns (ClearSessionResponse);
   rpc SearchModels(SearchModelsRequest) returns (SearchModelsResponse);
+  rpc EmbedMedia(EmbedMediaRequest) returns (EmbedMediaResponse);
 }

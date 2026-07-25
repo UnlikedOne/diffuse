@@ -1,5 +1,20 @@
 from huggingface_hub import HfApi
 
+MULTIMODAL = {
+    "idefics3",
+    "smolvlm",
+    "llava",
+    "llava_next",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "qwen2_audio",
+    "gemma3",
+    "mllama",
+    "internvl",
+    "video_llava",
+    "phi4_multimodal",
+}
+
 VALIDATED = {
     "llama",
     "qwen2",
@@ -39,12 +54,6 @@ UNSUPPORTED = {
     "bert",
     "roberta",
     "clip",
-    "llava",
-    "qwen2_vl",
-    "qwen2_5_vl",
-    "mllama",
-    "idefics2",
-    "idefics3",
 }
 
 UNSUPPORTED_NOTE = {
@@ -60,12 +69,6 @@ UNSUPPORTED_NOTE = {
     "bert": "encoder only, cannot generate",
     "roberta": "encoder only, cannot generate",
     "clip": "vision-text encoder, cannot generate",
-    "llava": "multimodal, the vision tower does not slice by layer",
-    "mllama": "multimodal, the vision tower does not slice by layer",
-    "qwen2_vl": "multimodal, the vision tower does not slice by layer",
-    "qwen2_5_vl": "multimodal, the vision tower does not slice by layer",
-    "idefics2": "multimodal, the vision tower does not slice by layer",
-    "idefics3": "multimodal, the vision tower does not slice by layer",
 }
 
 
@@ -73,8 +76,14 @@ def classify(model_type: str, architectures: list[str]) -> tuple[str, str]:
     kind = (model_type or "").lower()
     arch = architectures[0] if architectures else ""
 
+    if kind in MULTIMODAL:
+        return "validated", "multimodal, the encoder tower rides with the first slice"
+    # Checked before the ForConditionalGeneration heuristic below: encoder
+    # decoder stacks carry that same suffix and still cannot be sliced.
     if kind in UNSUPPORTED:
         return "unsupported", UNSUPPORTED_NOTE.get(kind, "architecture cannot be split by layer")
+    if arch.endswith(("ForConditionalGeneration", "ForImageTextToText")):
+        return "likely", "multimodal, untested here but the decoder stack should slice"
     if kind in VALIDATED:
         return "validated", "runs on Diffuse"
     if arch.endswith("ForCausalLM"):

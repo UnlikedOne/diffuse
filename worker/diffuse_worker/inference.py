@@ -253,3 +253,136 @@ class SliceRunner:
             self.caches.pop(session_id, None)
             self.cache_seen.pop(session_id, None)
             self.seq_lens.pop(session_id, None)
+
+MODALITIES = (
+    (
+        "get_image_features",
+        "image_token_id",
+        ("pixel_values", "pixel_attention_mask", "image_grid_thw", "image_sizes"),
+    ),
+    (
+        "get_video_features",
+        "video_token_id",
+        ("pixel_values_videos", "video_grid_thw", "video_sizes"),
+    ),
+    (
+        "get_audio_features",
+        "audio_token_id",
+        ("input_features", "feature_attention_mask", "audio_attention_mask"),
+    ),
+)
+
+
+def _feature_tensor(out, hidden_size):
+    """Pick the tensor that already lives in the decoder's hidden space.
+
+    Feature getters are not consistent about what they hand back. Some return a
+    plain projected tensor, others an output object where the raw tower states
+    sit in `last_hidden_state` and the projected ones in `pooler_output`.
+    Choosing by width rather than by attribute name keeps this working across
+    models instead of encoding one model's habits."""
+    candidates = []
+    for attr in ("pooler_output", "last_hidden_state", "image_embeds", "audio_embeds"):
+        value = getattr(out, attr, None)
+        if isinstance(value, torch.Tensor):
+            candidates.append(value)
+    if isinstance(out, torch.Tensor):
+        candidates.append(out)
+    elif isinstance(out, (tuple, list)):
+        candidates.extend(o for o in out if isinstance(o, torch.Tensor))
+
+    for tensor in candidates:
+        if tensor.shape[-1] == hidden_size:
+            return tensor
+    if candidates:
+        return candidates[0]
+    raise ValueError("the feature getter returned nothing tensor-like")
+
+
+class MediaEmbedder:
+    """Turns text plus media into the hidden states the decoder stack expects.
+
+    This runs where the embeddings live, which on a Diffuse client is the
+    machine itself: the picture or the recording is consumed here, and what
+    leaves is the same transformed activations a text prompt would produce."""
+
+    def __init__(self, model_slice):
+        self.slice = model_slice
+
+    def _token_id(self, attr):
+        cfg = self.slice.model.config if self.slice.model is not None else None
+        for holder in (cfg, getattr(cfg, "text_config", None)):
+            value = getattr(holder, attr, None) if holder is not None else None
+            if isinstance(value, int):
+                return value
+        tokenizer = self.slice.tokenizer
+        if tokenizer is not None:
+            token = getattr(cfg, attr.replace("_id", ""), None)
+            if isinstance(token, str):
+                resolved = tokenizer.convert_tokens_to_ids(token)
+                if isinstance(resolved, int) and resolved >= 0:
+                    return resolved
+        return None
+
+    def _feature_source(self, method):
+        for holder in (self.slice.model, getattr(self.slice.model, "model", None)):
+            if holder is not None and hasattr(holder, method):
+                return getattr(holder, method)
+        return None
+
+    def _project(self, features, hidden_size):
+        """Last resort when the getter only exposed raw tower states."""
+        for name, module in (self.slice.tower or {}).items():
+            if module is None or "vision" in name or "audio" in name:
+                continue
+            try:
+                projected = module(features)
+            except Exception:
+                continue
+            if isinstance(projected, torch.Tensor) and projected.shape[-1] == hidden_size:
+                return projected
+        raise ValueError(
+            f"media features are {features.shape[-1]} wide but the decoder expects "
+            f"{hidden_size}, and no projector in the tower bridged them"
+        )
+
+    @torch.inference_mode()
+    def embed(self, inputs) -> torch.Tensor:
+        input_ids = inputs["input_ids"]
+        device = self.slice.torch_device()
+        if input_ids.device != device:
+            input_ids = input_ids.to(device)
+        embeds = self.slice.embed_tokens(input_ids)
+
+        for method, token_attr, keys in MODALITIES:
+            primary = keys[0]
+            if primary not in inputs:
+                continue
+            source = self._feature_source(method)
+            token_id = self._token_id(token_attr)
+            if source is None or token_id is None:
+                raise ValueError(
+                    f"this build cannot embed {primary}: no {method} on the model "
+                    f"or no {token_attr} in its config"
+                )
+            accepted = set(inspect.signature(source).parameters)
+            kwargs = {
+                k: (v.to(device) if hasattr(v, "to") else v)
+                for k, v in inputs.items()
+                if k in keys and (k in accepted or "kwargs" in accepted)
+            }
+            hidden_size = embeds.shape[-1]
+            features = _feature_tensor(source(**kwargs), hidden_size)
+            if features.shape[-1] != hidden_size:
+                features = self._project(features, hidden_size)
+            features = features.reshape(-1, hidden_size).to(embeds.dtype)
+            mask = input_ids == token_id
+            slots = int(mask.sum())
+            if slots != features.shape[0]:
+                raise ValueError(
+                    f"{primary}: {features.shape[0]} feature rows for {slots} "
+                    f"placeholder tokens"
+                )
+            embeds = embeds.masked_scatter(mask.unsqueeze(-1), features)
+
+        return embeds

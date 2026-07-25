@@ -8,7 +8,7 @@ import torch
 from diffuse_worker import data_pb2, data_pb2_grpc
 from diffuse_worker.batching import BatchScheduler
 from diffuse_worker.config import WorkerConfig
-from diffuse_worker.inference import SliceRunner
+from diffuse_worker.inference import MediaEmbedder, SliceRunner
 from diffuse_worker.slicing import ModelSlice
 
 logging.basicConfig(level=logging.INFO)
@@ -185,6 +185,66 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             self.runner.clear_session(request.session_id)
         return data_pb2.ClearSessionResponse(ok=True)
     
+    def EmbedMedia(self, request, context):
+        """Turn text and attachments into hidden states, where the media stays.
+
+        Diffuse runs this on the machine that owns the prompt, so a picture or a
+        recording is consumed locally and only activations travel."""
+        if self.slice.processor is None or self.slice.embed_tokens is None:
+            return data_pb2.EmbedMediaResponse(
+                ok=False,
+                error="this slice cannot embed media: it holds no processor or no embeddings",
+            )
+        try:
+            import io
+
+            images, audio, videos = [], [], []
+            for item in request.media:
+                if item.kind == "audio":
+                    import soundfile
+
+                    samples, _rate = soundfile.read(io.BytesIO(item.data))
+                    audio.append(samples)
+                elif item.kind == "video":
+                    videos.append(item.data)
+                else:
+                    from PIL import Image
+
+                    images.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
+
+            if len(request.messages) > 0:
+                conversation = [
+                    {"role": m.role, "content": m.content} for m in request.messages
+                ]
+                text = self.slice.processor.apply_chat_template(
+                    conversation, add_generation_prompt=True
+                )
+            elif request.apply_chat_template:
+                text = self.slice.processor.apply_chat_template(
+                    [{"role": "user", "content": request.text}], add_generation_prompt=True
+                )
+            else:
+                text = request.text
+
+            kwargs = {"text": text, "return_tensors": "pt"}
+            if images:
+                kwargs["images"] = images
+            if audio:
+                kwargs["audio"] = audio
+            if videos:
+                kwargs["videos"] = videos
+            inputs = self.slice.processor(**kwargs)
+
+            embeds = MediaEmbedder(self.slice).embed(inputs)
+            return data_pb2.EmbedMediaResponse(
+                ok=True,
+                embeddings=tensor_to_proto(embeds, accepts_bf16=request.accepts_bf16),
+                token_count=int(embeds.shape[1]),
+            )
+        except Exception as exc:
+            log.exception("media embedding failed")
+            return data_pb2.EmbedMediaResponse(ok=False, error=str(exc))
+
     def SearchModels(self, request, context):
         try:
             from diffuse_worker.catalog import search
