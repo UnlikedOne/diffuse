@@ -14,7 +14,6 @@ message PeerInfo {
   bytes kx_public = 9;
   bool reachable = 10;
   uint32 total_layers = 11;
-  uint32 protocol_version = 12;
 }
 message GossipRequest {
   bytes from_node_id = 1;

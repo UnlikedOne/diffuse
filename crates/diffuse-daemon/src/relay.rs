@@ -266,6 +266,7 @@ async fn run_relay_client(
             {
                 Ok(r) => r,
                 Err(e) => ComputeResponse {
+                    protocol_version: crate::registry::WIRE_VERSION,
                     encrypted_activations: Vec::new(),
                     ok: false,
                     error: format!("relay compute failed: {}", e),
@@ -307,7 +308,7 @@ pub async fn relay_compute(
     activations: &crate::worker::pb::Tensor,
     top_k: u32,
     accepts_bf16: bool,
-) -> anyhow::Result<(crate::worker::pb::Tensor, u64)> {
+) -> anyhow::Result<(crate::worker::pb::Tensor, u64, u32)> {
     use pb::ComputeRequest;
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = crate::compute::tensor_to_bytes_pub(activations);
@@ -351,5 +352,5 @@ pub async fn relay_compute(
     }
     let plain_out = diffuse_trust::transport::decrypt(&secret, &response.encrypted_activations)?;
     let tensor = crate::compute::bytes_to_tensor_pub(&plain_out)?;
-    Ok((tensor, response.compute_ms))
+    Ok((tensor, response.compute_ms, response.protocol_version))
 }

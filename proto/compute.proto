@@ -28,6 +28,7 @@ message ComputeResponse {
   bool ok = 2;
   string error = 3;
   uint64 compute_ms = 4;
+  uint32 protocol_version = 5;
 }
 
 service Compute {

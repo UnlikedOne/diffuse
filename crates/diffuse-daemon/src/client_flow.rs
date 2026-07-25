@@ -61,7 +61,7 @@ impl ClientSession {
                 Some(crate::compute::connect_compute(&self.remote.daemon_endpoint).await?);
         }
         let client = self.remote_client.as_mut().unwrap();
-        let (logits, _compute_ms) = request_slice(
+        let (logits, _compute_ms, _peer_version) = request_slice(
             client,
             &self.remote.host_kx_public,
             &self.client_kx,

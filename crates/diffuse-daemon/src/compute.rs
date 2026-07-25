@@ -179,7 +179,7 @@ pub async fn request_slice(
     activations: &Tensor,
     top_k: u32,
     accepts_bf16: bool,
-) -> anyhow::Result<(Tensor, u64)> {
+) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
@@ -202,7 +202,7 @@ pub async fn request_slice(
     }
     let plain_out = decrypt(&secret, &response.encrypted_activations)?;
     let tensor = bytes_to_tensor(&plain_out)?;
-    Ok((tensor, response.compute_ms))
+    Ok((tensor, response.compute_ms, response.protocol_version))
 }
 
 pub async fn request_slice_chained(
@@ -217,7 +217,7 @@ pub async fn request_slice_chained(
     top_k: u32,
     route: Vec<pb::Hop>,
     accepts_bf16: bool,
-) -> anyhow::Result<(Tensor, u64)> {
+) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
@@ -240,7 +240,7 @@ pub async fn request_slice_chained(
     }
     let plain_out = decrypt(&secret, &response.encrypted_activations)?;
     let tensor = bytes_to_tensor(&plain_out)?;
-    Ok((tensor, response.compute_ms))
+    Ok((tensor, response.compute_ms, response.protocol_version))
 }
 
 pub fn spawn_compute_server(
@@ -306,6 +306,7 @@ pub async fn process_compute_request(
         ok: true,
         error: String::new(),
         compute_ms,
+        protocol_version: crate::registry::WIRE_VERSION,
     })
 }
 
@@ -394,5 +395,6 @@ pub async fn process_chained_request(
         ok: true,
         error: String::new(),
         compute_ms,
+        protocol_version: crate::registry::WIRE_VERSION,
     })
 }

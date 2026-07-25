@@ -16,7 +16,6 @@ fn peer(endpoint: &str, last_seen_ms: u64) -> Peer {
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
-        protocol_version: diffuse_daemon::registry::WIRE_VERSION,
     }
 }
 

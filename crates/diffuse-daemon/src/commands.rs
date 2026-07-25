@@ -317,7 +317,6 @@ pub async fn host(
         signature: Vec::new(),
         kx_public: self_kx_public.clone(),
         reachable: self_reachable,
-        protocol_version: crate::registry::WIRE_VERSION,
     };
     self_peer.signature = sign(&signing_key, &self_peer.signable_bytes());
     registry.lock().await.upsert(self_peer);
@@ -364,7 +363,6 @@ pub async fn host(
                         signature: Vec::new(),
                         kx_public: self_kx_public.clone(),
                         reachable: self_reachable,
-                        protocol_version: crate::registry::WIRE_VERSION,
                     };
                     fresh.signature = sign(&signing_key, &fresh.signable_bytes());
                     reg.upsert(fresh);

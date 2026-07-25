@@ -44,6 +44,17 @@ impl Replica {
             Replica::Relayed { alive, .. } => *alive = false,
         }
     }
+    pub fn learn_protocol_version(&mut self, version: u32) {
+        match self {
+            Replica::Local { .. } => {}
+            Replica::Remote {
+                protocol_version, ..
+            } => *protocol_version = version,
+            Replica::Relayed {
+                protocol_version, ..
+            } => *protocol_version = version,
+        }
+    }
     pub fn protocol_version(&self) -> u32 {
         match self {
             Replica::Local { .. } => crate::registry::WIRE_VERSION,
@@ -162,7 +173,13 @@ impl Stage {
                             accepts_bf16,
                         )
                         .await
-                        .map(|t| (t, local_start.elapsed().as_millis() as u64))
+                        .map(|t| {
+                            (
+                                t,
+                                local_start.elapsed().as_millis() as u64,
+                                crate::registry::WIRE_VERSION,
+                            )
+                        })
                 }
                 Replica::Remote {
                     compute_endpoint,
@@ -228,7 +245,8 @@ impl Stage {
             };
 
             match attempt {
-                Ok((out, compute_ms)) => {
+                Ok((out, compute_ms, peer_version)) => {
+                    self.replicas[idx].learn_protocol_version(peer_version);
                     let hop_ms = hop_start.elapsed().as_millis() as u64;
                     let network_ms = hop_ms.saturating_sub(compute_ms);
                     tracing::debug!(
@@ -463,7 +481,10 @@ impl Orchestrator {
         .await;
 
         match outcome {
-            Ok((out, compute_ms)) => {
+            Ok((out, compute_ms, peer_version)) => {
+                if let Some(r) = self.stages[0].replicas.get_mut(head_idx) {
+                    r.learn_protocol_version(peer_version);
+                }
                 let elapsed = start.elapsed().as_millis() as u64;
                 self.last_forward_compute_ms = compute_ms;
                 self.last_forward_network_ms = elapsed.saturating_sub(compute_ms);
@@ -826,7 +847,7 @@ pub async fn build_from_registry(
                     label: peer.daemon_endpoint.clone(),
                     alive: true,
                     client,
-                    protocol_version: peer.protocol_version,
+                    protocol_version: 0,
                 });
             } else {
                 match &relay_sentinel {
@@ -845,7 +866,7 @@ pub async fn build_from_registry(
                             label: format!("{} (relayed)", peer.daemon_endpoint),
                             alive: true,
                             client: None,
-                            protocol_version: peer.protocol_version,
+                            protocol_version: 0,
                         });
                     }
                     None => {

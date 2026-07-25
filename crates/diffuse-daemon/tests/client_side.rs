@@ -123,7 +123,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
     let mut compute_client = diffuse_daemon::compute::connect_compute("http://127.0.0.1:50312")
         .await
         .expect("connect to the encrypted compute channel");
-    let (logits, _compute_ms) = request_slice(
+    let (logits, _compute_ms, _peer_version) = request_slice(
         &mut compute_client,
         &host_kx_public,
         &client_kx,

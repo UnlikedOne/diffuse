@@ -32,7 +32,6 @@ pub fn signed_peer(
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
-        protocol_version: WIRE_VERSION,
     };
     peer.signature = sign(key, &peer.signable_bytes());
     peer

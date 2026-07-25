@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 /// Wire protocol this build speaks. Bumped when the format of what travels
-/// between nodes changes in a way older nodes cannot parse.
+/// between nodes changes in a way older nodes cannot parse. A peer's version is
+/// never taken from gossip: a node that predates a field silently drops it when
+/// relaying, and the field would be unsigned and so forgeable. It is learned
+/// from the peer's own answer on the encrypted channel instead.
 pub const WIRE_VERSION: u32 = 1;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,10 +25,6 @@ pub struct Peer {
     pub signature: Vec<u8>,
     pub kx_public: Vec<u8>,
     pub reachable: bool,
-    /// Wire protocol this peer speaks. `0` means "unknown" — a peer predating
-    /// the field, which must be addressed with the original wire format:
-    /// float32 activations, and no node-to-node forwarding.
-    pub protocol_version: u32,
 }
 
 pub fn now_ms() -> u64 {
@@ -150,12 +149,6 @@ impl Peer {
         if self.total_layers != 0 {
             buf.extend_from_slice(&self.total_layers.to_le_bytes());
         }
-        // Same treatment as `total_layers`: only signed once present, so a peer
-        // that predates the field still produces bytes a newer verifier can
-        // reproduce.
-        if self.protocol_version != 0 {
-            buf.extend_from_slice(&self.protocol_version.to_le_bytes());
-        }
         buf
     }
 }
@@ -177,7 +170,6 @@ mod tests {
             signature: vec![1, 2, 3],
             kx_public: vec![9; 32],
             reachable: true,
-            protocol_version: WIRE_VERSION,
         }
     }
 
@@ -188,7 +180,6 @@ mod tests {
         // recomputing them, still accepts the old signature.
         let mut legacy = peer(1, "http://a", "m", now_ms());
         legacy.total_layers = 0;
-        legacy.protocol_version = 0;
         let legacy_bytes = legacy.signable_bytes();
 
         // Reconstruct the pre-field byte layout by hand.
@@ -209,22 +200,10 @@ mod tests {
         // A peer that does report a total folds it into the signature.
         let mut modern = peer(1, "http://a", "m", now_ms());
         modern.total_layers = 64;
-        modern.protocol_version = 0;
         assert_eq!(
             modern.signable_bytes().len(),
             legacy_bytes.len() + 4,
             "a known total extends the signed bytes by its 4 encoded bytes"
-        );
-
-        // protocol_version follows the same rule: absent on old peers, so it
-        // must not disturb bytes they signed, and covered once announced.
-        let mut announced = peer(1, "http://a", "m", now_ms());
-        announced.total_layers = 64;
-        announced.protocol_version = WIRE_VERSION;
-        assert_eq!(
-            announced.signable_bytes().len(),
-            modern.signable_bytes().len() + 4,
-            "an announced protocol version is signed too"
         );
     }
 

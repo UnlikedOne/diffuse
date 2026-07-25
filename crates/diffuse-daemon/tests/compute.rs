@@ -94,7 +94,7 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
     let mut client = diffuse_daemon::compute::connect_compute("http://127.0.0.1:50301")
         .await
         .expect("connect to the encrypted compute channel");
-    let (out, _compute_ms) = request_slice(
+    let (out, _compute_ms, peer_version) = request_slice(
         &mut client,
         &host_kx_public,
         &my_kx,
@@ -109,6 +109,13 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
     .await
     .expect("encrypted delegation should succeed");
 
+    assert_eq!(
+        peer_version,
+        diffuse_daemon::registry::WIRE_VERSION,
+        "a host must announce the wire it speaks in its own encrypted answer, \
+         which is the only statement about itself that cannot be forged or \
+         stripped by a node relaying gossip"
+    );
     assert!(!out.data.is_empty(), "should receive activations back");
     assert_eq!(out.shape.len(), 3, "output should be hidden states [1, seq, hidden]");
 }

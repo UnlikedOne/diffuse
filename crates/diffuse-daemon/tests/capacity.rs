@@ -20,7 +20,6 @@ fn peer_with_total(model: &str, ep: &str, start: u32, end: u32, total: u32) -> P
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
-        protocol_version: diffuse_daemon::registry::WIRE_VERSION,
     }
 }
 

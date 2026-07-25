@@ -87,7 +87,6 @@ fn peer(
         signature: Vec::new(),
         kx_public: kx_public.to_vec(),
         reachable: true,
-        protocol_version: WIRE_VERSION,
     }
 }
 
