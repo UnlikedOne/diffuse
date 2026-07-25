@@ -284,8 +284,19 @@ async fn run_relay_client(
     Ok(())
 }
 
+pub async fn connect_relay(
+    endpoint: &str,
+) -> anyhow::Result<RelayClient<tonic::transport::Channel>> {
+    let client = RelayClient::connect(endpoint.to_string())
+        .await?
+        .max_decoding_message_size(128 * 1024 * 1024)
+        .max_encoding_message_size(128 * 1024 * 1024);
+    Ok(client)
+}
+
 pub async fn relay_compute(
     relay_endpoint: &str,
+    client: &mut Option<RelayClient<tonic::transport::Channel>>,
     target_node_id: &[u8],
     host_kx_public: &[u8; 32],
     my_kx: &diffuse_trust::transport::KeyExchange,
@@ -301,10 +312,12 @@ pub async fn relay_compute(
     let plain = crate::compute::tensor_to_bytes_pub(activations);
     let encrypted = diffuse_trust::transport::encrypt(&secret, &plain)?;
 
-    let mut client = RelayClient::connect(relay_endpoint.to_string())
-        .await?
-        .max_decoding_message_size(128 * 1024 * 1024)
-        .max_encoding_message_size(128 * 1024 * 1024);
+    if client.is_none() {
+        *client = Some(connect_relay(relay_endpoint).await?);
+    }
+    let relay = client
+        .as_mut()
+        .expect("relay client was just established above");
 
     let compute_req = ComputeRequest {
         requester_kx_public: my_kx.public_bytes().to_vec(),
@@ -317,13 +330,19 @@ pub async fn relay_compute(
         route: Vec::new(),
     };
 
-    let response = client
+    let response = match relay
         .relay_compute(RelayComputeRequest {
             target_node_id: target_node_id.to_vec(),
             request: Some(compute_req),
         })
-        .await?
-        .into_inner();
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            *client = None;
+            return Err(anyhow::anyhow!("relay {} failed: {}", relay_endpoint, e));
+        }
+    };
 
     if !response.ok {
         anyhow::bail!("relay compute failed: {}", response.error);

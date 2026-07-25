@@ -24,6 +24,7 @@ pub enum Replica {
         host_kx_public: [u8; 32],
         label: String,
         alive: bool,
+        client: Option<crate::relay::pb::relay_client::RelayClient<Channel>>,
     },
 }
 impl Replica {
@@ -190,10 +191,12 @@ impl Stage {
                     relay_endpoint,
                     target_node_id,
                     host_kx_public,
+                    client,
                     ..
                 } => {
                     crate::relay::relay_compute(
                         relay_endpoint,
+                        client,
                         target_node_id,
                         host_kx_public,
                         session_kx,
@@ -792,6 +795,7 @@ pub async fn build_from_registry(
                             host_kx_public: kx,
                             label: format!("{} (relayed)", peer.daemon_endpoint),
                             alive: true,
+                            client: None,
                         });
                     }
                     None => {
