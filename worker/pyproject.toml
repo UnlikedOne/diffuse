@@ -22,6 +22,9 @@ multimodal = [
     "torchvision>=0.17",
     "soundfile>=0.12",
     "librosa>=0.10",
+    # Mistral checkpoints ship a tekken.json rather than a tokenizer_config,
+    # so their processor cannot build a chat template without this.
+    "mistral-common>=1.5",
 ]
 dev = [
     "pytest>=8.0",

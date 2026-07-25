@@ -78,3 +78,52 @@ def test_catalog_offers_multimodal_and_still_refuses_unsliceable():
     assert classify("qwen2_audio", ["Qwen2AudioForConditionalGeneration"])[0] == "validated"
     assert classify("mamba", ["MambaForCausalLM"])[0] == "unsupported"
     assert classify("t5", ["T5ForConditionalGeneration"])[0] == "unsupported"
+
+
+class _FakeModel:
+    """Stands in for a built model: only its parameter names matter here."""
+
+    def __init__(self, names):
+        self._names = names
+
+    def named_parameters(self):
+        return [(n, None) for n in self._names]
+
+    def named_buffers(self):
+        return []
+
+
+def test_checkpoint_keys_are_aligned_onto_the_model_names():
+    from diffuse_worker.slicing import _align_state_keys
+
+    model = _FakeModel(
+        [
+            "model.audio_tower.conv1.weight",
+            "model.audio_tower.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.embed_tokens.weight",
+        ]
+    )
+    # How Voxtral actually spells them, which is not how the class does.
+    state = {
+        "audio_tower.conv1.weight": 1,
+        "audio_tower.layers.0.self_attn.q_proj.weight": 2,
+        "language_model.model.layers.0.self_attn.q_proj.weight": 3,
+        "language_model.model.embed_tokens.weight": 4,
+    }
+    aligned = _align_state_keys(model, state)
+
+    assert aligned["model.audio_tower.conv1.weight"] == 1
+    # The tower names its blocks exactly like the decoder does; a tower tensor
+    # must not land on a decoder layer, nor the other way round.
+    assert aligned["model.audio_tower.layers.0.self_attn.q_proj.weight"] == 2
+    assert aligned["model.language_model.layers.0.self_attn.q_proj.weight"] == 3
+    assert aligned["model.language_model.embed_tokens.weight"] == 4
+
+
+def test_alignment_leaves_already_correct_names_alone():
+    from diffuse_worker.slicing import _align_state_keys
+
+    model = _FakeModel(["model.layers.0.mlp.up_proj.weight"])
+    state = {"model.layers.0.mlp.up_proj.weight": 7}
+    assert _align_state_keys(model, state) == state

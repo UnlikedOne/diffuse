@@ -273,6 +273,49 @@ def _remap_key(name: str, start_layer: int) -> str:
     idx = int(m.group(1))
     return name[: m.start(1)] + str(idx - start_layer) + name[m.end(1) :]
 
+def _align_state_keys(model, state):
+    """Map checkpoint names onto the names this model actually uses.
+
+    A checkpoint does not have to spell its tensors the way the class does:
+    Voxtral ships `audio_tower.conv1.weight` for a module the model calls
+    `model.audio_tower.conv1.weight`. from_pretrained reconciles that; loading
+    a state dict by hand does not, and the mismatch shows up as parameters left
+    unmaterialised. Matching on the longest unique suffix bridges the two
+    without hardcoding any one checkpoint's habits."""
+    expected = [n for n, _ in model.named_parameters()]
+    expected += [n for n, _ in model.named_buffers()]
+    known = set(expected)
+
+    suffixes = {}
+    for name in expected:
+        parts = name.split(".")
+        for i in range(len(parts)):
+            suffixes.setdefault(".".join(parts[i:]), []).append(name)
+
+    aligned = {}
+    for key, tensor in state.items():
+        if key in known:
+            aligned[key] = tensor
+            continue
+        parts = key.split(".")
+        from_tower = _is_tower_tensor(key)
+        for i in range(len(parts)):
+            candidates = suffixes.get(".".join(parts[i:]))
+            if not candidates:
+                continue
+            # An encoder tower carries layers named exactly like the decoder's,
+            # down to `layers.0.self_attn.q_proj.weight`, so a suffix alone is
+            # ambiguous. Keeping only candidates on the same side of that line
+            # makes the match unique again.
+            candidates = [c for c in candidates if _is_tower_tensor(c) == from_tower]
+            if len(candidates) == 1:
+                aligned[candidates[0]] = tensor
+                break
+        else:
+            aligned[key] = tensor
+    return aligned
+
+
 def _detach_unused_modules(model, parts, start_layer, end_layer, total):
     unused = []
     if start_layer != 0:
@@ -487,7 +530,7 @@ class ModelSlice:
                     key = _remap_key(name, start_layer)
                     state[key] = f.get_tensor(name)
 
-        model.load_state_dict(state, strict=False, assign=True)
+        model.load_state_dict(_align_state_keys(model, state), strict=False, assign=True)
 
         head = model.get_output_embeddings()
         src = model.get_input_embeddings()
