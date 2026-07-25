@@ -306,6 +306,7 @@ pub async fn relay_compute(
     session_id: &str,
     activations: &crate::worker::pb::Tensor,
     top_k: u32,
+    accepts_bf16: bool,
 ) -> anyhow::Result<(crate::worker::pb::Tensor, u64)> {
     use pb::ComputeRequest;
     let secret = my_kx.shared_secret(host_kx_public);
@@ -328,6 +329,7 @@ pub async fn relay_compute(
         encrypted_activations: encrypted,
         top_k,
         route: Vec::new(),
+        accepts_bf16,
     };
 
     let response = match relay

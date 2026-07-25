@@ -20,8 +20,10 @@ MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 TOPK_DTYPE = "topk_i64_f32"
 
 
-def tensor_to_proto(t: torch.Tensor) -> data_pb2.Tensor:
+def tensor_to_proto(t: torch.Tensor, accepts_bf16: bool = False) -> data_pb2.Tensor:
     t = t.detach().cpu()
+    if t.dtype in (torch.bfloat16, torch.float16) and not accepts_bf16:
+        t = t.to(torch.float32)
     if t.dtype is torch.bfloat16:
         return data_pb2.Tensor(
             shape=list(t.shape),
@@ -118,7 +120,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             if isinstance(out, tuple):
                 payload = topk_to_proto(*out)
             else:
-                payload = tensor_to_proto(out)
+                payload = tensor_to_proto(out, accepts_bf16=request.accepts_bf16)
             return data_pb2.SliceResponse(
                 session_id=request.session_id,
                 activations=payload,

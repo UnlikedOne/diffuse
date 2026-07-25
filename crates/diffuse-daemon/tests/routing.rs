@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use diffuse_daemon::compute::spawn_compute_server;
 use diffuse_daemon::orchestrator::build_from_registry;
-use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
+use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry, WIRE_VERSION};
 use diffuse_daemon::worker::WorkerHandle;
 use diffuse_trust::transport::KeyExchange;
 use tokio::sync::Mutex;
@@ -87,6 +87,7 @@ fn peer(
         signature: Vec::new(),
         kx_public: kx_public.to_vec(),
         reachable: true,
+        protocol_version: WIRE_VERSION,
     }
 }
 

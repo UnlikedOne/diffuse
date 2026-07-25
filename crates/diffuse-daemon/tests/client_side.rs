@@ -94,18 +94,15 @@ async fn prompt_never_leaves_client_only_activations_do() {
 
     // Client executes slice 0:2 locally -> activations. Tokens stay here.
     let local_activations = client_w
-        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0)
+        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false)
         .await
         .expect("local first-slice execution");
 
-    // What leaves the client is activations (float hidden states), not tokens.
-    assert!(
-        matches!(
-            local_activations.dtype.as_str(),
-            "float32" | "float16" | "bfloat16"
-        ),
-        "what leaves the client must be activations, not integer tokens (got {})",
-        local_activations.dtype
+    // A requester that did not opt into the current wire format must still be
+    // answered in float32, the format every released version can parse.
+    assert_eq!(
+        local_activations.dtype, "float32",
+        "a requester that does not announce bf16 support must get float32 back"
     );
     assert_eq!(
         local_activations.shape.len(),
@@ -136,6 +133,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
         "client-session",
         &local_activations,
         0,
+        false,
     )
     .await
     .expect("remote completion over encrypted channel");

@@ -8,6 +8,7 @@ message Hop {
   uint32 start_layer = 3;
   uint32 end_layer = 4;
   uint32 top_k = 5;
+  bool accepts_bf16 = 6;
 }
 
 message ComputeRequest {
@@ -19,6 +20,7 @@ message ComputeRequest {
   bytes encrypted_activations = 6;
   uint32 top_k = 7;
   repeated Hop route = 8;
+  bool accepts_bf16 = 9;
 }
 
 message ComputeResponse {

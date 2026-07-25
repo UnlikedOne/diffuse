@@ -52,6 +52,7 @@ impl ClientSession {
                 input,
                 true,
                 0,
+                false,
             )
             .await?;
 
@@ -70,6 +71,7 @@ impl ClientSession {
             session_id,
             &local_activations,
             0,
+            false,
         )
         .await?;
 

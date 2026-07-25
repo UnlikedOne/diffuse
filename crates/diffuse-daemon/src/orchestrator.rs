@@ -17,6 +17,7 @@ pub enum Replica {
         label: String,
         alive: bool,
         client: Option<ComputeClient<Channel>>,
+        protocol_version: u32,
     },
     Relayed {
         relay_endpoint: String,
@@ -25,6 +26,7 @@ pub enum Replica {
         label: String,
         alive: bool,
         client: Option<crate::relay::pb::relay_client::RelayClient<Channel>>,
+        protocol_version: u32,
     },
 }
 impl Replica {
@@ -41,6 +43,16 @@ impl Replica {
             Replica::Remote { alive, .. } => *alive = false,
             Replica::Relayed { alive, .. } => *alive = false,
         }
+    }
+    pub fn protocol_version(&self) -> u32 {
+        match self {
+            Replica::Local { .. } => crate::registry::WIRE_VERSION,
+            Replica::Remote { protocol_version, .. } => *protocol_version,
+            Replica::Relayed { protocol_version, .. } => *protocol_version,
+        }
+    }
+    pub fn speaks_current_wire(&self) -> bool {
+        self.protocol_version() >= crate::registry::WIRE_VERSION
     }
     pub fn label(&self) -> String {
         match self {
@@ -129,6 +141,7 @@ impl Stage {
         use_cache: bool,
         session_kx: &KeyExchange,
         top_k: u32,
+        accepts_bf16: bool,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -146,6 +159,7 @@ impl Stage {
                     worker
                         .run_slice(
                             model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
+                            accepts_bf16,
                         )
                         .await
                         .map(|t| (t, local_start.elapsed().as_millis() as u64))
@@ -168,6 +182,7 @@ impl Stage {
                                 session_id,
                                 &input,
                                 top_k,
+                                accepts_bf16,
                             )
                             .await
                         }
@@ -176,7 +191,7 @@ impl Stage {
                                 Ok(mut c) => {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
-                                        start, end, session_id, &input, top_k,
+                                        start, end, session_id, &input, top_k, accepts_bf16,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -206,6 +221,7 @@ impl Stage {
                         session_id,
                         &input,
                         top_k,
+                        accepts_bf16,
                     )
                     .await
                 }
@@ -243,6 +259,16 @@ impl Stage {
         }
 
         anyhow::bail!("all replicas dead for slice {}:{}", start, end)
+    }
+
+    /// Whether the replica that will consume this stage's input can parse the
+    /// current wire format. A peer that predates it must be fed float32.
+    pub fn accepts_bf16(&self) -> bool {
+        self.replicas
+            .iter()
+            .find(|r| r.is_alive())
+            .map(|r| r.speaks_current_wire())
+            .unwrap_or(false)
     }
 
     pub fn live_replicas(&self) -> usize {
@@ -355,7 +381,7 @@ impl Orchestrator {
         let mut hops = Vec::with_capacity(self.stages.len());
         for (i, stage) in self.stages.iter().enumerate() {
             let idx = stage.replicas.iter().position(|r| {
-                r.is_alive() && matches!(r, Replica::Remote { .. })
+                r.is_alive() && matches!(r, Replica::Remote { .. }) && r.speaks_current_wire()
             })?;
             let Replica::Remote {
                 compute_endpoint,
@@ -373,6 +399,7 @@ impl Orchestrator {
                     start_layer: stage.start_layer,
                     end_layer: stage.end_layer,
                     top_k: if i == last { top_k } else { 0 },
+                    accepts_bf16: true,
                 },
             ));
         }
@@ -394,6 +421,7 @@ impl Orchestrator {
 
         let head_idx = route[0].0;
         let head_hop = route[0].1.clone();
+        let head_accepts_bf16 = route.get(1).map(|(_, h)| h.accepts_bf16).unwrap_or(false);
         let rest: Vec<_> = route[1..].iter().map(|(_, hop)| hop.clone()).collect();
         let head_kx: [u8; 32] = match head_hop.kx_public.as_slice().try_into() {
             Ok(k) => k,
@@ -430,6 +458,7 @@ impl Orchestrator {
             input,
             head_hop.top_k,
             rest,
+            head_accepts_bf16,
         )
         .await;
 
@@ -487,13 +516,32 @@ impl Orchestrator {
         let model_id = self.model_id.clone();
         let session_kx = self.session_kx.clone();
         let last_stage = self.stages.len().saturating_sub(1);
+        // Each stage must emit a format the *next* stage can parse. The last
+        // stage answers the client, which either asked for top-k or accepts the
+        // float32 logits every version understands.
+        let consumer_accepts: Vec<bool> = (0..self.stages.len())
+            .map(|i| {
+                self.stages
+                    .get(i + 1)
+                    .map(|next| next.accepts_bf16())
+                    .unwrap_or(false)
+            })
+            .collect();
         let mut t = ids_to_tensor(ids);
         let mut compute_sum = 0u64;
         let mut network_sum = 0u64;
         for (idx, stage) in self.stages.iter_mut().enumerate() {
             let stage_top_k = if idx == last_stage { top_k } else { 0 };
             t = stage
-                .run_with_failover(&model_id, session_id, t, use_cache, &session_kx, stage_top_k)
+                .run_with_failover(
+                    &model_id,
+                    session_id,
+                    t,
+                    use_cache,
+                    &session_kx,
+                    stage_top_k,
+                    consumer_accepts[idx],
+                )
                 .await?;
             compute_sum += stage.last_compute_ms;
             network_sum += stage.last_network_ms;
@@ -778,6 +826,7 @@ pub async fn build_from_registry(
                     label: peer.daemon_endpoint.clone(),
                     alive: true,
                     client,
+                    protocol_version: peer.protocol_version,
                 });
             } else {
                 match &relay_sentinel {
@@ -796,6 +845,7 @@ pub async fn build_from_registry(
                             label: format!("{} (relayed)", peer.daemon_endpoint),
                             alive: true,
                             client: None,
+                            protocol_version: peer.protocol_version,
                         });
                     }
                     None => {

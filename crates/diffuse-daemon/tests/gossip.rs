@@ -73,6 +73,7 @@ async fn unsigned_peer_is_rejected() {
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
+        protocol_version: diffuse_daemon::registry::WIRE_VERSION,
     };
     {
         let mut b = reg_b.lock().await;

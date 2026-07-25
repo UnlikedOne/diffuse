@@ -504,6 +504,7 @@ mod tests {
             signature: Vec::new(),
             kx_public: Vec::new(),
             reachable: true,
+            protocol_version: crate::registry::WIRE_VERSION,
         }
     }
 

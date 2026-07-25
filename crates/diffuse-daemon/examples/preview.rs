@@ -15,6 +15,7 @@ fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
+        protocol_version: diffuse_daemon::registry::WIRE_VERSION,
     }
 }
 

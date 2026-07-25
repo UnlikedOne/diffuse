@@ -178,6 +178,7 @@ pub async fn request_slice(
     session_id: &str,
     activations: &Tensor,
     top_k: u32,
+    accepts_bf16: bool,
 ) -> anyhow::Result<(Tensor, u64)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -192,6 +193,7 @@ pub async fn request_slice(
             encrypted_activations: encrypted,
             top_k,
             route: Vec::new(),
+            accepts_bf16,
         })
         .await?
         .into_inner();
@@ -214,6 +216,7 @@ pub async fn request_slice_chained(
     activations: &Tensor,
     top_k: u32,
     route: Vec<pb::Hop>,
+    accepts_bf16: bool,
 ) -> anyhow::Result<(Tensor, u64)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -228,6 +231,7 @@ pub async fn request_slice_chained(
             encrypted_activations: encrypted,
             top_k,
             route,
+            accepts_bf16,
         })
         .await?
         .into_inner();
@@ -290,6 +294,7 @@ pub async fn process_compute_request(
             tensor,
             true,
             req.top_k,
+            req.accepts_bf16,
         )
         .await?
     };
@@ -331,6 +336,7 @@ pub async fn process_chained_request(
             tensor,
             true,
             req.top_k,
+            req.accepts_bf16,
         )
         .await?
     };
@@ -361,6 +367,7 @@ pub async fn process_chained_request(
                 encrypted_activations: forwarded,
                 top_k: next.top_k,
                 route: req.route[1..].to_vec(),
+                accepts_bf16: req.route.get(1).map(|h| h.accepts_bf16).unwrap_or(false),
             })
             .await;
 

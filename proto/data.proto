@@ -17,6 +17,7 @@ message SliceRequest {
   Tensor activations = 6;
   bool use_cache = 7;
   uint32 top_k = 8;
+  bool accepts_bf16 = 9;
 }
 
 message SliceResponse {

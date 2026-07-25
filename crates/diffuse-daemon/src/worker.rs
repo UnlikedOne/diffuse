@@ -69,6 +69,7 @@ impl WorkerHandle {
         activations: Tensor,
         use_cache: bool,
         top_k: u32,
+        accepts_bf16: bool,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -79,6 +80,7 @@ impl WorkerHandle {
             activations: Some(activations),
             use_cache,
             top_k,
+            accepts_bf16,
         });
         let response = self.client.run_slice(request).await?.into_inner();
         if !response.ok {

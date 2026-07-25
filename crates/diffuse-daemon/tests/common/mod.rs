@@ -2,7 +2,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use diffuse_daemon::registry::{now_ms, Peer};
+use diffuse_daemon::registry::{now_ms, Peer, WIRE_VERSION};
 use diffuse_trust::crypto::sign;
 
 pub fn new_key() -> SigningKey {
@@ -32,6 +32,7 @@ pub fn signed_peer(
         signature: Vec::new(),
         kx_public: Vec::new(),
         reachable: true,
+        protocol_version: WIRE_VERSION,
     };
     peer.signature = sign(key, &peer.signable_bytes());
     peer
