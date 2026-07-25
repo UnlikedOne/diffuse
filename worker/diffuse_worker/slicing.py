@@ -374,6 +374,20 @@ class ModelSlice:
             self.end_layer = 0
             self.total_layers = total
             self._load_frontend(model_id, hf_token, cache_dir)
+            # A text client needs nothing but the tokenizer. A multimodal one
+            # has to hold the embeddings and the encoder tower, because that is
+            # what turns a picture or a recording into activations, and doing it
+            # anywhere else would mean handing the raw media to a stranger.
+            if self.multimodal:
+                tied = bool(getattr(cfg, "tie_word_embeddings", False))
+                try:
+                    plan = _plan_download(model_id, 0, 0, total, hf_token, tied)
+                    if plan:
+                        self._load_partial(
+                            model_id, cfg, plan, 0, 0, total, tied, hf_token, cache_dir
+                        )
+                except Exception as exc:
+                    print(f"could not load the media frontend ({exc}), text only")
             return LoadedSlice(model_id, 0, 0, total)
 
         if end_layer > total:

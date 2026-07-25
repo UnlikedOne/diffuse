@@ -36,9 +36,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Query {
             model,
             prompt,
+            image,
+            audio,
+            video,
+            media,
             bootstrap,
             max_tokens,
-        } => commands::query(&model, &prompt, &bootstrap, max_tokens, identity).await,
+        } => {
+            let attachments = commands::collect_attachments(&image, &audio, &video, &media)?;
+            commands::query(&model, &prompt, attachments, &bootstrap, max_tokens, identity).await
+        }
         Command::Models { bootstrap } => commands::models(&bootstrap, identity).await,
         Command::Chat { bootstrap, memory } => commands::chat(&bootstrap, memory, identity).await,
         Command::Serve {

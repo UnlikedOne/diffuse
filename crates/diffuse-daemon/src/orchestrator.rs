@@ -91,6 +91,10 @@ pub struct Orchestrator {
     pub last_forward_compute_ms: u64,
     pub last_forward_network_ms: u64,
     pub chain_enabled: bool,
+    /// Embedded media for the session in flight. Kept because a broken route is
+    /// recovered by replaying the prefix, and for a multimodal prompt the
+    /// prefix is not expressible as token ids.
+    pub session_prefill: Option<Tensor>,
 }
 
 pub const DECODE_TOP_K: u32 = 8;
@@ -526,8 +530,23 @@ impl Orchestrator {
         use_cache: bool,
         top_k: u32,
     ) -> anyhow::Result<Tensor> {
+        self.forward_tensor(ids_to_tensor(ids), session_id, use_cache, top_k)
+            .await
+    }
+
+    /// Push an already-embedded sequence through the pipeline.
+    ///
+    /// Media never becomes token ids: the client turns a picture or a recording
+    /// into hidden states itself, and those enter the route in place of a
+    /// prompt, which the first stage passes straight to its layers.
+    pub async fn forward_tensor(
+        &mut self,
+        input: Tensor,
+        session_id: &str,
+        use_cache: bool,
+        top_k: u32,
+    ) -> anyhow::Result<Tensor> {
         if self.chain_enabled && use_cache {
-            let input = ids_to_tensor(ids);
             match self.forward_chained(&input, session_id, top_k).await {
                 Ok(Some(out)) => return Ok(out),
                 Ok(None) => {}
@@ -548,7 +567,7 @@ impl Orchestrator {
                     .unwrap_or(false)
             })
             .collect();
-        let mut t = ids_to_tensor(ids);
+        let mut t = input;
         let mut compute_sum = 0u64;
         let mut network_sum = 0u64;
         for (idx, stage) in self.stages.iter_mut().enumerate() {
@@ -595,11 +614,58 @@ impl Orchestrator {
                         MAX_REPLAYS
                     );
                     self.clear_session(session_id).await;
+                    // Media has to go back through first: the surviving nodes
+                    // hold no cache, and the picture is not in the token ids.
+                    if let Some(prefill) = self.session_prefill.clone() {
+                        self.forward_tensor(prefill, session_id, true, 0).await?;
+                    }
                     ids = full_ids;
                 }
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Generate from an already-embedded prompt, streaming each token out.
+    ///
+    /// The prefill carries whatever the client embedded, text and media alike;
+    /// decoding then continues on token ids like any other session.
+    pub async fn generate_from_embeddings<F>(
+        &mut self,
+        prefill: Tensor,
+        max_new_tokens: usize,
+        session_id: &str,
+        eos_id: Option<i64>,
+        mut on_token: F,
+    ) -> anyhow::Result<Vec<i64>>
+    where
+        F: FnMut(i64),
+    {
+        self.session_prefill = Some(prefill.clone());
+        let logits = self
+            .forward_tensor(prefill, session_id, true, DECODE_TOP_K)
+            .await?;
+        let mut next = next_token(&logits)?;
+        let mut produced = vec![next];
+        on_token(next);
+        if Some(next) == eos_id {
+            self.session_prefill = None;
+            return Ok(produced);
+        }
+
+        for _ in 1..max_new_tokens {
+            let logits = self
+                .forward_step(&[next], &produced, session_id, DECODE_TOP_K)
+                .await?;
+            next = next_token(&logits)?;
+            if Some(next) == eos_id {
+                break;
+            }
+            produced.push(next);
+            on_token(next);
+        }
+        self.session_prefill = None;
+        Ok(produced)
     }
 
     pub async fn generate(
@@ -899,6 +965,7 @@ pub async fn build_from_registry(
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
         chain_enabled: true,
+        session_prefill: None,
     })
 }
 

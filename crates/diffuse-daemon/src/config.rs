@@ -73,6 +73,18 @@ pub enum Command {
         model: String,
         #[arg(long)]
         prompt: String,
+        /// Image to send with the prompt. Repeatable.
+        #[arg(long)]
+        image: Vec<String>,
+        /// Audio clip to send with the prompt. Repeatable.
+        #[arg(long)]
+        audio: Vec<String>,
+        /// Video to send with the prompt. Repeatable.
+        #[arg(long)]
+        video: Vec<String>,
+        /// Any attachment; its kind is taken from the file extension.
+        #[arg(long)]
+        media: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         bootstrap: Vec<String>,
         #[arg(long, default_value_t = 80)]

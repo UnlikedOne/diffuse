@@ -212,16 +212,24 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
 
                     images.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
 
+            # The chat template is what puts a placeholder in the prompt for every
+            # attachment. Sending the text alone would leave the processor with
+            # media it has nowhere to insert.
+            parts = [{"type": item.kind or "image"} for item in request.media]
             if len(request.messages) > 0:
                 conversation = [
                     {"role": m.role, "content": m.content} for m in request.messages
                 ]
+                if parts and conversation:
+                    last = conversation[-1]
+                    last["content"] = parts + [{"type": "text", "text": last["content"]}]
                 text = self.slice.processor.apply_chat_template(
                     conversation, add_generation_prompt=True
                 )
             elif request.apply_chat_template:
+                content = parts + [{"type": "text", "text": request.text}]
                 text = self.slice.processor.apply_chat_template(
-                    [{"role": "user", "content": request.text}], add_generation_prompt=True
+                    [{"role": "user", "content": content}], add_generation_prompt=True
                 )
             else:
                 text = request.text

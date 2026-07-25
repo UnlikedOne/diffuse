@@ -165,6 +165,34 @@ impl WorkerHandle {
         Ok((response.models, response.available_bytes, response.device))
     }
 
+    pub async fn embed_media(
+        &mut self,
+        text: &str,
+        media: Vec<(String, Vec<u8>, String)>,
+        apply_chat_template: bool,
+        accepts_bf16: bool,
+    ) -> anyhow::Result<(Tensor, u32)> {
+        let attachments: Vec<pb::MediaAttachment> = media
+            .into_iter()
+            .map(|(kind, data, mime)| pb::MediaAttachment { kind, data, mime })
+            .collect();
+        let request = tonic::Request::new(pb::EmbedMediaRequest {
+            text: text.to_string(),
+            messages: Vec::new(),
+            media: attachments,
+            apply_chat_template,
+            accepts_bf16,
+        });
+        let response = self.client.embed_media(request).await?.into_inner();
+        if !response.ok {
+            anyhow::bail!("media embedding failed: {}", response.error);
+        }
+        let embeddings = response
+            .embeddings
+            .ok_or_else(|| anyhow::anyhow!("worker returned no embeddings"))?;
+        Ok((embeddings, response.token_count))
+    }
+
     pub async fn encode_messages(
         &mut self,
         messages: Vec<(String, String)>,

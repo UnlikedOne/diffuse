@@ -467,9 +467,100 @@ pub(crate) async fn start_local_tokenizer(port: u16) -> anyhow::Result<(WorkerGu
     }
 }
 
+/// An attachment ready for the local worker: what it is, and its bytes.
+#[derive(Debug)]
+pub struct Attachment {
+    pub kind: String,
+    pub data: Vec<u8>,
+    pub mime: String,
+    pub label: String,
+}
+
+fn kind_from_extension(path: &std::path::Path) -> (&'static str, &'static str) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "bmp" => ("image", "image/bmp"),
+        "tif" | "tiff" => ("image", "image/tiff"),
+        "wav" => ("audio", "audio/wav"),
+        "mp3" => ("audio", "audio/mpeg"),
+        "flac" => ("audio", "audio/flac"),
+        "ogg" | "oga" => ("audio", "audio/ogg"),
+        "m4a" | "aac" => ("audio", "audio/aac"),
+        "mp4" => ("video", "video/mp4"),
+        "mov" => ("video", "video/quicktime"),
+        "mkv" => ("video", "video/x-matroska"),
+        "webm" => ("video", "video/webm"),
+        "avi" => ("video", "video/x-msvideo"),
+        _ => ("", ""),
+    }
+}
+
+fn read_attachment(path: &str, forced_kind: Option<&str>) -> anyhow::Result<Attachment> {
+    let p = std::path::Path::new(path);
+    let (guessed, mime) = kind_from_extension(p);
+    let kind = match forced_kind {
+        Some(k) => k,
+        None if !guessed.is_empty() => guessed,
+        None => anyhow::bail!(
+            "cannot tell what kind of media {} is; pass it with --image, --audio or --video",
+            path
+        ),
+    };
+    let data = std::fs::read(p)
+        .map_err(|e| anyhow::anyhow!("cannot read attachment {}: {}", path, e))?;
+    if data.is_empty() {
+        anyhow::bail!("attachment {} is empty", path);
+    }
+    Ok(Attachment {
+        kind: kind.to_string(),
+        mime: if mime.is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime.to_string()
+        },
+        label: p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path)
+            .to_string(),
+        data,
+    })
+}
+
+pub fn collect_attachments(
+    images: &[String],
+    audio: &[String],
+    video: &[String],
+    media: &[String],
+) -> anyhow::Result<Vec<Attachment>> {
+    let mut out = Vec::new();
+    for path in images {
+        out.push(read_attachment(path, Some("image"))?);
+    }
+    for path in audio {
+        out.push(read_attachment(path, Some("audio"))?);
+    }
+    for path in video {
+        out.push(read_attachment(path, Some("video"))?);
+    }
+    for path in media {
+        out.push(read_attachment(path, None)?);
+    }
+    Ok(out)
+}
+
 pub async fn query(
     model: &str,
     prompt: &str,
+    attachments: Vec<Attachment>,
     bootstrap_sentinels: &[String],
     max_tokens: usize,
     identity: Identity,
@@ -524,19 +615,45 @@ pub async fn query(
         crate::orchestrator::build_from_registry(model, &reg, 2, Vec::new(), sentinels.first().cloned()).await?
     };
 
-    // Encode locally (tokens stay here).
-    let (ids, eos) = tokenizer_worker.encode(prompt, true).await?;
-
-    println!("  {} generating over encrypted channel...", "→".bright_blue());
-    println!();
-
     let session_id = format!("query-{}", uuid::Uuid::new_v4());
-    let out = orch.generate(&ids, max_tokens, &session_id, Some(eos)).await?;
+
+    // Prompt and media are consumed here. What leaves is activations.
+    let new_ids = if attachments.is_empty() {
+        let (ids, eos) = tokenizer_worker.encode(prompt, true).await?;
+        println!("  {} generating over encrypted channel...", "→".bright_blue());
+        println!();
+        let out = orch.generate(&ids, max_tokens, &session_id, Some(eos)).await?;
+        out[ids.len()..].to_vec()
+    } else {
+        for item in &attachments {
+            println!(
+                "  {} {} {} stays on this machine, only activations leave",
+                "◆".bright_green(),
+                item.kind.bright_white(),
+                item.label.dimmed()
+            );
+        }
+        let eos = tokenizer_worker.encode(prompt, true).await.map(|(_, e)| e)?;
+        let media: Vec<(String, Vec<u8>, String)> = attachments
+            .iter()
+            .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
+            .collect();
+        let (embeddings, token_count) = tokenizer_worker
+            .embed_media(prompt, media, true, true)
+            .await?;
+        println!(
+            "  {} embedded into {} hidden states",
+            "→".bright_blue(),
+            token_count.to_string().bright_white()
+        );
+        println!("  {} generating over encrypted channel...", "→".bright_blue());
+        println!();
+        orch.generate_from_embeddings(embeddings, max_tokens, &session_id, Some(eos), |_| {})
+            .await?
+    };
+
     orch.clear_session(&session_id).await;
-    tracing::info!("generated {} tokens total, {} new", out.len(), out.len() - ids.len());
-    tracing::info!("new token ids: {:?}", &out[ids.len()..]);
-    let text = tokenizer_worker.decode(&out[ids.len()..], true).await?;
-    tracing::info!("decoded text length: {}", text.len());
+    let text = tokenizer_worker.decode(&new_ids, true).await?;
 
     println!("  {}", "answer:".bright_green().bold());
     println!("  {}", text);
