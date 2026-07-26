@@ -48,6 +48,60 @@ changes. Each plane works without the plane above it.
 - Hosting and querying are chosen separately.
 - A model is servable only if all its slices are covered.
 
+## Modalities
+
+- Whatever a model accepts on the way in, whatever it produces on the way out.
+  Text is one case, not the shape of the system.
+- Media never travels raw. It becomes activations where it is owned: the
+  encoder tower rides with the slice holding the embeddings, which on a client
+  is its own machine. A node receives the same transformed numbers a text
+  prompt would produce.
+- Output travels as tokens, never as decoded bytes. Kilobytes instead of
+  megabytes, and the picture or the waveform only ever exists on the machine
+  that asked for it.
+- The detokenizer (VQ decoder, vocoder) is a client concern, symmetric to the
+  encoder tower. A node never holds the finished answer.
+- An answer is typed: text, or bytes with a media type. The chat, the CLI and
+  the OpenAI facade all carry that type through.
+- A model may emit several token streams per step (audio codebooks). The last
+  slice returns K streams; text is K=1, not a special case.
+
+## Computation shapes
+
+The data plane assumes one invariant: an ordered stack of homogeneous layers,
+one tensor between two layers, state carried per session. A model is supported
+when its computation has one of the accepted shapes, not when it is on a list.
+
+Accepted:
+- Autoregressive. One step is one traversal, state is the KV cache.
+- Encoder memory. The decoder reads an encoder's output at every layer
+  (Whisper and the encoder-decoder family). That memory is a session-scoped
+  side input, like the cache: sent once, held for the session.
+
+Deferred:
+- Iterative refinement (DiT diffusion: Flux, SD3, PixArt). The stack is
+  homogeneous and does slice, but an image costs 20 to 50 full traversals
+  instead of one per token, and there is no cache to carry. Worth it on GPU
+  nodes only. Deferred on cost, not refused on principle.
+
+Refused:
+- U-Net diffusion (SDXL and its family). Skip connections across resolutions
+  mean the interface between two points is several tensors at different scales
+  rather than one. It does not fit a chain; forcing it would mean a second data
+  plane.
+- trust_remote_code. Arbitrary Python on volunteer machines contradicts the
+  promise the network is built on. A security decision, not a technical one.
+
+## Model descriptor
+
+- What a model eats and produces is derived from its Hugging Face config, never
+  from a hand-kept registry: layer count from the text sub-config, encoder tower
+  from the module names, output kind from the head.
+- A model that cannot be sliced is refused with the reason, in the catalogue,
+  rather than failing at load time.
+- An unknown architecture is offered as untested rather than hidden. The
+  network learns what works by being used.
+
 ## Contribution
 
 - User-controlled: max / moderate / min / pause.
@@ -110,7 +164,12 @@ changes. Each plane works without the plane above it.
 - Session recovery after client disconnect.
 - Protocol versioning from the first commit.
 - Observability (Prometheus metrics).
-- Excluded: distributed fine-tuning, multimodality, polished UI.
+- Excluded: distributed fine-tuning, polished UI.
+
+Multimodality was excluded here originally. That decision is reversed: it cost
+nothing in the data plane, because a multimodal checkpoint is the same stack of
+layers with an encoder tower bolted to the front, and the tower is an endpoint
+concern. See Modalities and Computation shapes above.
 
 ## Build order
 
