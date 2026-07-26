@@ -187,12 +187,17 @@ pub async fn request_slice(
     top_k: u32,
     accepts_bf16: bool,
     position_ids: Option<&Tensor>,
+    encoder_memory: Option<&Tensor>,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
     let encrypted_position_ids = match position_ids {
         Some(p) => encrypt(&secret, &tensor_to_bytes(p))?,
+        None => Vec::new(),
+    };
+    let encrypted_encoder_memory = match encoder_memory {
+        Some(m) => encrypt(&secret, &tensor_to_bytes(m))?,
         None => Vec::new(),
     };
     let response = client
@@ -207,6 +212,7 @@ pub async fn request_slice(
             route: Vec::new(),
             accepts_bf16,
             encrypted_position_ids,
+            encrypted_encoder_memory,
         })
         .await?
         .into_inner();
@@ -231,12 +237,17 @@ pub async fn request_slice_chained(
     route: Vec<pb::Hop>,
     accepts_bf16: bool,
     position_ids: Option<&Tensor>,
+    encoder_memory: Option<&Tensor>,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
     let encrypted = encrypt(&secret, &plain)?;
     let encrypted_position_ids = match position_ids {
         Some(p) => encrypt(&secret, &tensor_to_bytes(p))?,
+        None => Vec::new(),
+    };
+    let encrypted_encoder_memory = match encoder_memory {
+        Some(m) => encrypt(&secret, &tensor_to_bytes(m))?,
         None => Vec::new(),
     };
     let response = client
@@ -251,6 +262,7 @@ pub async fn request_slice_chained(
             route,
             accepts_bf16,
             encrypted_position_ids,
+            encrypted_encoder_memory,
         })
         .await?
         .into_inner();
@@ -302,6 +314,7 @@ pub async fn process_compute_request(
     let plain = decrypt(&secret, &req.encrypted_activations)?;
     let tensor = bytes_to_tensor(&plain)?;
     let positions = decode_positions(&secret, &req.encrypted_position_ids)?;
+    let memory = decode_positions(&secret, &req.encrypted_encoder_memory)?;
     let compute_start = std::time::Instant::now();
     let out = {
         let mut w = worker.lock().await.clone();
@@ -316,6 +329,7 @@ pub async fn process_compute_request(
             req.top_k,
             req.accepts_bf16,
             positions,
+            memory,
         )
         .await?
     };
@@ -346,6 +360,7 @@ pub async fn process_chained_request(
     let plain = decrypt(&secret, &req.encrypted_activations)?;
     let tensor = bytes_to_tensor(&plain)?;
     let positions = decode_positions(&secret, &req.encrypted_position_ids)?;
+    let memory = decode_positions(&secret, &req.encrypted_encoder_memory)?;
 
     let compute_start = std::time::Instant::now();
     let out = {
@@ -361,6 +376,7 @@ pub async fn process_chained_request(
             req.top_k,
             req.accepts_bf16,
             positions.clone(),
+            memory.clone(),
         )
         .await?
     };
@@ -396,6 +412,10 @@ pub async fn process_chained_request(
                 // the whole chain rather than being recomputed per hop.
                 encrypted_position_ids: match &positions {
                     Some(p) => encrypt(&next_secret, &tensor_to_bytes(p))?,
+                    None => Vec::new(),
+                },
+                encrypted_encoder_memory: match &memory {
+                    Some(m) => encrypt(&next_secret, &tensor_to_bytes(m))?,
                     None => Vec::new(),
                 },
             })

@@ -22,6 +22,7 @@ message ComputeRequest {
   repeated Hop route = 8;
   bool accepts_bf16 = 9;
   bytes encrypted_position_ids = 10;
+  bytes encrypted_encoder_memory = 11;
 }
 
 message ComputeResponse {

@@ -160,6 +160,7 @@ impl Stage {
         top_k: u32,
         accepts_bf16: bool,
         position_ids: Option<&Tensor>,
+        encoder_memory: Option<&Tensor>,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -177,7 +178,7 @@ impl Stage {
                     worker
                         .run_slice(
                             model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
-                            accepts_bf16, position_ids.cloned(),
+                            accepts_bf16, position_ids.cloned(), encoder_memory.cloned(),
                         )
                         .await
                         .map(|t| {
@@ -208,6 +209,7 @@ impl Stage {
                                 top_k,
                                 accepts_bf16,
                                 position_ids,
+                                encoder_memory,
                             )
                             .await
                         }
@@ -217,7 +219,7 @@ impl Stage {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
                                         start, end, session_id, &input, top_k, accepts_bf16,
-                                        position_ids,
+                                        position_ids, encoder_memory,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -439,6 +441,7 @@ impl Orchestrator {
         session_id: &str,
         top_k: u32,
         position_ids: Option<&Tensor>,
+        encoder_memory: Option<&Tensor>,
     ) -> anyhow::Result<Option<Tensor>> {
         if self.stages.len() < 2 {
             return Ok(None);
@@ -488,6 +491,7 @@ impl Orchestrator {
             rest,
             head_accepts_bf16,
             position_ids,
+            encoder_memory,
         )
         .await;
 
@@ -553,7 +557,7 @@ impl Orchestrator {
         use_cache: bool,
         top_k: u32,
     ) -> anyhow::Result<Tensor> {
-        self.forward_positioned(input, session_id, use_cache, top_k, None)
+        self.forward_positioned(input, session_id, use_cache, top_k, None, None)
             .await
     }
 
@@ -564,10 +568,17 @@ impl Orchestrator {
         use_cache: bool,
         top_k: u32,
         position_ids: Option<Tensor>,
+        encoder_memory: Option<Tensor>,
     ) -> anyhow::Result<Tensor> {
         if self.chain_enabled && use_cache {
             match self
-                .forward_chained(&input, session_id, top_k, position_ids.as_ref())
+                .forward_chained(
+                    &input,
+                    session_id,
+                    top_k,
+                    position_ids.as_ref(),
+                    encoder_memory.as_ref(),
+                )
                 .await
             {
                 Ok(Some(out)) => return Ok(out),
@@ -604,6 +615,7 @@ impl Orchestrator {
                     stage_top_k,
                     consumer_accepts[idx],
                     position_ids.as_ref(),
+                    encoder_memory.as_ref(),
                 )
                 .await?;
             compute_sum += stage.last_compute_ms;
@@ -641,7 +653,7 @@ impl Orchestrator {
                     // hold no cache, and the picture is not in the token ids.
                     if let Some(prefill) = self.session_prefill.clone() {
                         let positions = self.session_positions.clone();
-                        self.forward_positioned(prefill, session_id, true, 0, positions)
+                        self.forward_positioned(prefill, session_id, true, 0, positions, None)
                             .await?;
                     }
                     ids = full_ids;
@@ -649,6 +661,22 @@ impl Orchestrator {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// One pass for a model whose answer is not text.
+    ///
+    /// The orchestrator stays ignorant here: it relays a tensor in and returns
+    /// whatever the last slice produced, however many streams that is. What the
+    /// streams mean, and what to feed next, is decided on the machine that
+    /// asked, where the model's own code lives.
+    pub async fn forward_streams(
+        &mut self,
+        input: Tensor,
+        memory: Option<Tensor>,
+        session_id: &str,
+    ) -> anyhow::Result<Tensor> {
+        self.forward_positioned(input, session_id, true, 0, None, memory)
+            .await
     }
 
     /// Generate from an already-embedded prompt, streaming each token out.
@@ -670,7 +698,7 @@ impl Orchestrator {
         self.session_prefill = Some(prefill.clone());
         self.session_positions = position_ids.clone();
         let logits = self
-            .forward_positioned(prefill, session_id, true, DECODE_TOP_K, position_ids)
+            .forward_positioned(prefill, session_id, true, DECODE_TOP_K, position_ids, None)
             .await?;
         let mut next = next_token(&logits)?;
         let mut produced = vec![next];

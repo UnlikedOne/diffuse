@@ -106,6 +106,7 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
         0,
         false,
         None,
+        None,
     )
     .await
     .expect("encrypted delegation should succeed");

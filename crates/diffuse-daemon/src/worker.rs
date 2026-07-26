@@ -71,6 +71,7 @@ impl WorkerHandle {
         top_k: u32,
         accepts_bf16: bool,
         position_ids: Option<Tensor>,
+        encoder_memory: Option<Tensor>,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -83,6 +84,7 @@ impl WorkerHandle {
             top_k,
             accepts_bf16,
             position_ids,
+            encoder_memory,
         });
         let response = self.client.run_slice(request).await?.into_inner();
         if !response.ok {
@@ -199,6 +201,73 @@ impl WorkerHandle {
             .embeddings
             .ok_or_else(|| anyhow::anyhow!("worker returned no embeddings"))?;
         Ok((embeddings, response.token_count, response.position_ids))
+    }
+
+    pub async fn begin_generation(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        media: Vec<(String, Vec<u8>, String)>,
+        max_new_tokens: u32,
+    ) -> anyhow::Result<(Tensor, Option<Tensor>, u32, String)> {
+        let attachments: Vec<pb::MediaAttachment> = media
+            .into_iter()
+            .map(|(kind, data, mime)| pb::MediaAttachment { kind, data, mime })
+            .collect();
+        let response = self
+            .client
+            .begin_generation(tonic::Request::new(pb::BeginGenerationRequest {
+                session_id: session_id.to_string(),
+                text: text.to_string(),
+                media: attachments,
+                max_new_tokens,
+                accepts_bf16: true,
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("could not start generation: {}", response.error);
+        }
+        let first = response
+            .input_ids
+            .ok_or_else(|| anyhow::anyhow!("worker returned nothing to feed the network"))?;
+        Ok((first, response.encoder_memory, response.streams, response.output_kind))
+    }
+
+    pub async fn advance_generation(
+        &mut self,
+        session_id: &str,
+        streams: Tensor,
+    ) -> anyhow::Result<Option<Tensor>> {
+        let response = self
+            .client
+            .advance_generation(tonic::Request::new(pb::AdvanceGenerationRequest {
+                session_id: session_id.to_string(),
+                streams: Some(streams),
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("generation stalled: {}", response.error);
+        }
+        Ok(if response.finished { None } else { response.input_ids })
+    }
+
+    pub async fn finish_generation(
+        &mut self,
+        session_id: &str,
+    ) -> anyhow::Result<(Vec<u8>, String, String)> {
+        let response = self
+            .client
+            .finish_generation(tonic::Request::new(pb::FinishGenerationRequest {
+                session_id: session_id.to_string(),
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("could not assemble the answer: {}", response.error);
+        }
+        Ok((response.data, response.mime, response.text))
     }
 
     pub async fn encode_messages(

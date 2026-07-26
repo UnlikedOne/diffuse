@@ -37,12 +37,94 @@ pub(crate) fn incomplete_model_message(cap: &ModelCapacity) -> String {
 }
 
 fn human_bytes(b: u64) -> String {
-    let gb = b as f64 / 1_073_741_824.0;
-    if gb >= 1.0 {
-        format!("{:.1} GB", gb)
-    } else {
-        format!("{:.0} MB", b as f64 / 1_048_576.0)
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = b as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
     }
+    if unit == 0 {
+        format!("{} {}", b, UNITS[unit])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_generative(
+    orch: &mut crate::orchestrator::Orchestrator,
+    worker: &mut WorkerHandle,
+    session_id: &str,
+    first: crate::worker::pb::Tensor,
+    memory: Option<crate::worker::pb::Tensor>,
+    streams: u32,
+    kind: &str,
+    attachments: &[Attachment],
+) -> anyhow::Result<()> {
+    for item in attachments {
+        println!(
+            "  {} {} {} stays on this machine, only activations leave",
+            "◆".bright_green(),
+            item.kind.bright_white(),
+            item.label.dimmed()
+        );
+    }
+    println!(
+        "  {} this model answers with {} on {} stream{}",
+        "→".bright_blue(),
+        kind.bright_white(),
+        streams.to_string().bright_white(),
+        if streams > 1 { "s" } else { "" }
+    );
+    if memory.is_some() {
+        println!(
+            "  {} the prompt was read here; its encoding is what travels",
+            "→".bright_blue()
+        );
+    }
+    println!("  {} generating over encrypted channel...", "→".bright_blue());
+    println!();
+
+    let mut step = first;
+    let mut produced = 0usize;
+    loop {
+        let out = orch
+            .forward_streams(step, memory.clone(), session_id)
+            .await?;
+        match worker.advance_generation(session_id, out).await? {
+            Some(next) => {
+                step = next;
+                produced += 1;
+            }
+            None => break,
+        }
+    }
+    orch.clear_session(session_id).await;
+
+    let (data, mime, text) = worker.finish_generation(session_id).await?;
+    if !text.is_empty() {
+        println!("  {}", "answer:".bright_green().bold());
+        println!("  {}", text);
+        println!();
+        return Ok(());
+    }
+
+    let extension = mime.rsplit('/').next().unwrap_or("bin");
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(format!("diffuse-{}.{}", &session_id[..8.min(session_id.len())], extension));
+    std::fs::write(&path, &data)?;
+    println!("  {}", "answer:".bright_green().bold());
+    println!(
+        "  {} of {} after {} steps",
+        human_bytes(data.len() as u64).bright_white(),
+        mime.bright_white(),
+        produced.to_string().bright_white()
+    );
+    println!("  {}", path.display().to_string().bright_green().bold());
+    println!();
+    Ok(())
 }
 
 pub async fn plan(
@@ -616,6 +698,32 @@ pub async fn query(
     };
 
     let session_id = format!("query-{}", uuid::Uuid::new_v4());
+
+    // Ask the local worker what this model answers with. A model that returns
+    // audio or pixels is driven differently from one that returns words.
+    let media: Vec<(String, Vec<u8>, String)> = attachments
+        .iter()
+        .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
+        .collect();
+    let generative = tokenizer_worker
+        .begin_generation(&session_id, prompt, media.clone(), max_tokens as u32)
+        .await;
+
+    if let Ok((first, memory, streams, kind)) = generative {
+        if kind != "text" {
+            return run_generative(
+                &mut orch,
+                &mut tokenizer_worker,
+                &session_id,
+                first,
+                memory,
+                streams,
+                &kind,
+                &attachments,
+            )
+            .await;
+        }
+    }
 
     // Prompt and media are consumed here. What leaves is activations.
     let new_ids = if attachments.is_empty() {

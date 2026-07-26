@@ -19,6 +19,7 @@ message SliceRequest {
   uint32 top_k = 8;
   bool accepts_bf16 = 9;
   Tensor position_ids = 10;
+  Tensor encoder_memory = 11;
 }
 
 message SliceResponse {
@@ -152,6 +153,47 @@ message SearchModelsResponse {
   string account = 7;
 }
 
+message BeginGenerationRequest {
+  string session_id = 1;
+  string text = 2;
+  repeated MediaAttachment media = 3;
+  uint32 max_new_tokens = 4;
+  bool accepts_bf16 = 5;
+}
+
+message BeginGenerationResponse {
+  bool ok = 1;
+  string error = 2;
+  Tensor input_ids = 3;
+  Tensor encoder_memory = 4;
+  uint32 streams = 5;
+  string output_kind = 6;
+}
+
+message AdvanceGenerationRequest {
+  string session_id = 1;
+  Tensor streams = 2;
+}
+
+message AdvanceGenerationResponse {
+  bool ok = 1;
+  string error = 2;
+  Tensor input_ids = 3;
+  bool finished = 4;
+}
+
+message FinishGenerationRequest {
+  string session_id = 1;
+}
+
+message FinishGenerationResponse {
+  bool ok = 1;
+  string error = 2;
+  bytes data = 3;
+  string mime = 4;
+  string text = 5;
+}
+
 message ClearSessionRequest {
   string session_id = 1;
 }
@@ -170,4 +212,7 @@ service InferenceWorker {
   rpc ClearSession(ClearSessionRequest) returns (ClearSessionResponse);
   rpc SearchModels(SearchModelsRequest) returns (SearchModelsResponse);
   rpc EmbedMedia(EmbedMediaRequest) returns (EmbedMediaResponse);
+  rpc BeginGeneration(BeginGenerationRequest) returns (BeginGenerationResponse);
+  rpc AdvanceGeneration(AdvanceGenerationRequest) returns (AdvanceGenerationResponse);
+  rpc FinishGeneration(FinishGenerationRequest) returns (FinishGenerationResponse);
 }

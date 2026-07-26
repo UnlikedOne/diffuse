@@ -332,6 +332,7 @@ pub async fn relay_compute(
         route: Vec::new(),
         accepts_bf16,
         encrypted_position_ids: Vec::new(),
+        encrypted_encoder_memory: Vec::new(),
     };
 
     let response = match relay

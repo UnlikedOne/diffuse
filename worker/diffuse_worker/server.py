@@ -8,6 +8,7 @@ import torch
 from diffuse_worker import data_pb2, data_pb2_grpc
 from diffuse_worker.batching import BatchScheduler
 from diffuse_worker.config import WorkerConfig
+from diffuse_worker.generation import GenerationSession, SessionStore
 from diffuse_worker.inference import MediaEmbedder, SliceRunner
 from diffuse_worker.slicing import ModelSlice
 
@@ -63,6 +64,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         self.slice = ModelSlice(device=config.device)
         self.runner: SliceRunner | None = None
         self.scheduler: BatchScheduler | None = None
+        self.sessions = SessionStore()
         self.loaded = False
 
     def LoadSlice(self, request, context):
@@ -106,7 +108,12 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 if request.HasField("position_ids")
                 else None
             )
-            if positions is not None:
+            memory = (
+                proto_to_tensor(request.encoder_memory)
+                if request.HasField("encoder_memory")
+                else None
+            )
+            if positions is not None or memory is not None:
                 # Multi-axis positions cannot be batched with other sessions,
                 # which carry their own; run this one on its own.
                 out = self.runner.run(
@@ -116,6 +123,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     use_cache=request.use_cache,
                     top_k=request.top_k,
                     position_ids=positions,
+                    memory=memory,
                 )
             elif self.scheduler is not None:
                 out = self.scheduler.submit(
@@ -292,6 +300,85 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         except Exception as exc:
             log.exception("media embedding failed")
             return data_pb2.EmbedMediaResponse(ok=False, error=str(exc))
+
+    def BeginGeneration(self, request, context):
+        """Open a generation on this machine and say what it will produce."""
+        if self.slice.model is None:
+            return data_pb2.BeginGenerationResponse(
+                ok=False, error="this slice holds no model endpoints for generation"
+            )
+        try:
+            processor = self.slice.processor or self.slice.tokenizer
+            inputs = self._build_inputs(processor, request)
+            session = GenerationSession(
+                self.slice, max_new_tokens=request.max_new_tokens or 256
+            )
+            first = session.begin(inputs)
+            self.sessions.start(request.session_id, session)
+            return data_pb2.BeginGenerationResponse(
+                ok=True,
+                input_ids=tensor_to_proto(first),
+                encoder_memory=(
+                    tensor_to_proto(session.memory, accepts_bf16=request.accepts_bf16)
+                    if session.memory is not None
+                    else None
+                ),
+                streams=session.stream_count(),
+                output_kind=session.output_kind(),
+            )
+        except Exception as exc:
+            log.exception("begin generation failed")
+            return data_pb2.BeginGenerationResponse(ok=False, error=str(exc))
+
+    def _build_inputs(self, processor, request):
+        import io
+
+        images, audio = [], []
+        for item in request.media:
+            if item.kind == "audio":
+                import soundfile
+
+                samples, _rate = soundfile.read(io.BytesIO(item.data))
+                audio.append(samples)
+            else:
+                from PIL import Image
+
+                images.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
+        kwargs = {"text": [request.text], "return_tensors": "pt"}
+        if images:
+            kwargs["images"] = images
+        if audio:
+            kwargs["audio"] = audio
+        try:
+            return processor(**kwargs, padding=True)
+        except TypeError:
+            return processor(request.text, return_tensors="pt")
+
+    def AdvanceGeneration(self, request, context):
+        session = self.sessions.get(request.session_id)
+        if session is None:
+            return data_pb2.AdvanceGenerationResponse(ok=False, error="unknown session")
+        try:
+            nxt = session.advance(proto_to_tensor(request.streams))
+            return data_pb2.AdvanceGenerationResponse(
+                ok=True,
+                input_ids=tensor_to_proto(nxt) if nxt is not None else None,
+                finished=nxt is None,
+            )
+        except Exception as exc:
+            log.exception("advance generation failed")
+            return data_pb2.AdvanceGenerationResponse(ok=False, error=str(exc))
+
+    def FinishGeneration(self, request, context):
+        session = self.sessions.drop(request.session_id)
+        if session is None:
+            return data_pb2.FinishGenerationResponse(ok=False, error="unknown session")
+        try:
+            data, mime, text = session.finish()
+            return data_pb2.FinishGenerationResponse(ok=True, data=data, mime=mime, text=text)
+        except Exception as exc:
+            log.exception("finish generation failed")
+            return data_pb2.FinishGenerationResponse(ok=False, error=str(exc))
 
     def SearchModels(self, request, context):
         try:

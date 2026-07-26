@@ -94,6 +94,26 @@ def is_multimodal(cfg) -> bool:
     )
 
 
+def needs_endpoints(cfg) -> bool:
+    """Whether a client has to hold more than a tokenizer for this model.
+
+    A plain decoder needs none: text in, text out. Anything with an encoder to
+    read media or a prompt, or a codec to turn generated tokens back into
+    bytes, needs those pieces on the machine that owns the question, since that
+    is where the media is consumed and where the answer is rebuilt."""
+    if is_multimodal(cfg):
+        return True
+    decoder = text_config(cfg)
+    for name in dir(cfg):
+        if name.startswith("_"):
+            continue
+        section = getattr(cfg, name, None)
+        if section is None or section is decoder or not hasattr(section, "to_dict"):
+            continue
+        return True
+    return False
+
+
 def model_class_for(cfg):
     """The class that can build this checkpoint.
 
@@ -477,7 +497,7 @@ class ModelSlice:
             # has to hold the embeddings and the encoder tower, because that is
             # what turns a picture or a recording into activations, and doing it
             # anywhere else would mean handing the raw media to a stranger.
-            if self.multimodal:
+            if needs_endpoints(cfg):
                 tied = bool(getattr(cfg, "tie_word_embeddings", False))
                 try:
                     plan = _plan_download(model_id, 0, 0, total, hf_token, tied)
