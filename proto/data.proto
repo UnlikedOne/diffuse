@@ -129,6 +129,10 @@ message ModelCard {
   bool gated = 7;
   string support = 8;
   string note = 9;
+  uint32 layers = 10;
+  uint32 hidden_size = 11;
+  repeated string inputs = 12;
+  repeated string outputs = 13;
 }
 
 message SearchModelsRequest {
@@ -144,6 +148,8 @@ message SearchModelsResponse {
   repeated ModelCard models = 3;
   uint64 available_bytes = 4;
   string device = 5;
+  bool authenticated = 6;
+  string account = 7;
 }
 
 message ClearSessionRequest {

@@ -1,96 +1,112 @@
-from huggingface_hub import HfApi
+import json
+from concurrent.futures import ThreadPoolExecutor
 
-MULTIMODAL = {
-    "idefics3",
-    "smolvlm",
-    "llava",
-    "llava_next",
-    "qwen2_vl",
-    "qwen2_5_vl",
-    "qwen2_audio",
-    "gemma3",
-    "mllama",
-    "internvl",
-    "video_llava",
-    "phi4_multimodal",
+from huggingface_hub import HfApi, hf_hub_download
+
+# What a model can do is read off its own config. Nothing here is a list of
+# models or of families: a checkpoint published tomorrow is judged by the same
+# rules as one published last year.
+
+_GENERATIVE_SUFFIXES = (
+    "ForCausalLM",
+    "ForConditionalGeneration",
+    "ForImageTextToText",
+    "ForSpeechSeq2Seq",
+    "LMHeadModel",
+)
+
+_MEDIA_SECTIONS = {
+    "vision_config": "image",
+    "audio_config": "audio",
+    "video_config": "video",
 }
 
-VALIDATED = {
-    "llama",
-    "qwen2",
-    "qwen3",
-    "mistral",
-    "gemma",
-    "gemma2",
-    "gemma3",
-    "phi",
-    "phi3",
-    "gpt2",
-    "gptj",
-    "gpt_neox",
-    "stablelm",
-    "olmo",
-    "olmo2",
-    "starcoder2",
-    "cohere",
-    "granite",
-    "smollm3",
-    "falcon",
-    "exaone",
-    "minicpm",
-    "internlm2",
-}
-
-UNSUPPORTED = {
-    "mamba",
-    "mamba2",
-    "rwkv",
-    "jamba",
-    "recurrent_gemma",
-    "t5",
-    "mt5",
-    "bart",
-    "whisper",
-    "bert",
-    "roberta",
-    "clip",
-}
-
-UNSUPPORTED_NOTE = {
-    "mamba": "state space model, no attention layers to slice",
-    "mamba2": "state space model, no attention layers to slice",
-    "rwkv": "recurrent architecture, no transformer layers to slice",
-    "jamba": "hybrid mamba and attention, slicing is not uniform",
-    "recurrent_gemma": "recurrent architecture, no uniform layer stack",
-    "t5": "encoder-decoder, Diffuse slices decoder-only stacks",
-    "mt5": "encoder-decoder, Diffuse slices decoder-only stacks",
-    "bart": "encoder-decoder, Diffuse slices decoder-only stacks",
-    "whisper": "speech model, not a causal language model",
-    "bert": "encoder only, cannot generate",
-    "roberta": "encoder only, cannot generate",
-    "clip": "vision-text encoder, cannot generate",
-}
+# A recurrent stack carries its own state instead of a key/value cache, so a
+# slice cannot hand its neighbour a cache the way a transformer does.
+_RECURRENT_KEYS = ("state_size", "conv_kernel", "time_step_rank", "time_mix_extra_dim")
 
 
-def classify(model_type: str, architectures: list[str]) -> tuple[str, str]:
-    kind = (model_type or "").lower()
-    arch = architectures[0] if architectures else ""
+def _text_section(config: dict) -> dict:
+    inner = config.get("text_config")
+    return inner if isinstance(inner, dict) else config
 
-    if kind in MULTIMODAL:
-        return "validated", "multimodal, the encoder tower rides with the first slice"
-    # Checked before the ForConditionalGeneration heuristic below: encoder
-    # decoder stacks carry that same suffix and still cannot be sliced.
-    if kind in UNSUPPORTED:
-        return "unsupported", UNSUPPORTED_NOTE.get(kind, "architecture cannot be split by layer")
-    if arch.endswith(("ForConditionalGeneration", "ForImageTextToText")):
-        return "likely", "multimodal, untested here but the decoder stack should slice"
-    if kind in VALIDATED:
-        return "validated", "runs on Diffuse"
-    if arch.endswith("ForCausalLM"):
-        return "likely", "decoder-only, should slice but is untested here"
-    if arch:
-        return "unsupported", f"{arch} is not a causal language model"
-    return "likely", "architecture unknown, will be checked when hosting"
+
+def _layer_count(config: dict):
+    inner = _text_section(config)
+    for key in ("num_hidden_layers", "n_layer", "num_layers"):
+        value = inner.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _architecture(config: dict) -> str:
+    archs = config.get("architectures") or []
+    return archs[0] if archs else ""
+
+
+def describe(config: dict) -> dict:
+    """Read a checkpoint's own config and say what Diffuse can do with it."""
+    arch = _architecture(config)
+    layers = _layer_count(config)
+    inner = _text_section(config)
+
+    # Two independent tells, because a model may reuse one tower for several
+    # modalities: a sub-config for the encoder, and a placeholder token id for
+    # what the processor is willing to splice in. Qwen2-VL declares no video
+    # section but does declare a video token, and it does take video.
+    inputs = ["text"]
+    for section, modality in _MEDIA_SECTIONS.items():
+        if isinstance(config.get(section), dict) and modality not in inputs:
+            inputs.append(modality)
+    for modality in ("image", "audio", "video"):
+        marker = f"{modality}_token_id"
+        if (marker in config or marker in inner) and modality not in inputs:
+            inputs.append(modality)
+
+    generative = arch.endswith(_GENERATIVE_SUFFIXES)
+    recurrent = any(key in inner for key in _RECURRENT_KEYS)
+    encoder_decoder = bool(config.get("is_encoder_decoder"))
+
+    if layers is None:
+        support, note = "unsupported", "no layer stack in its config to split"
+    elif not generative:
+        support, note = "unsupported", f"{arch or 'this architecture'} does not generate"
+    elif encoder_decoder:
+        support, note = (
+            "unsupported",
+            "encoder-decoder: its decoder reads the encoder at every layer",
+        )
+    elif recurrent:
+        support, note = (
+            "unsupported",
+            "recurrent state, which one slice cannot hand to the next",
+        )
+    elif len(inputs) > 1:
+        support, note = "ready", "the encoder tower rides with the first slice"
+    else:
+        support, note = "ready", "a plain decoder stack, splits cleanly"
+
+    return {
+        "architecture": arch,
+        "model_type": config.get("model_type") or "",
+        "layers": layers or 0,
+        "hidden_size": inner.get("hidden_size") or 0,
+        "vocab_size": inner.get("vocab_size") or 0,
+        "inputs": inputs,
+        "outputs": ["text"],
+        "support": support,
+        "note": note,
+    }
+
+
+def _fetch_config(model_id: str, token: str | None):
+    try:
+        path = hf_hub_download(model_id, "config.json", token=token)
+        with open(path) as handle:
+            return json.load(handle)
+    except Exception:
+        return None
 
 
 def search(
@@ -100,7 +116,7 @@ def search(
     supported_only: bool = True,
 ) -> list[dict]:
     api = HfApi(token=hf_token)
-    models = api.list_models(
+    listed = api.list_models(
         search=query or None,
         filter="text-generation",
         sort="downloads",
@@ -108,34 +124,50 @@ def search(
         expand=["config", "safetensors", "downloads", "likes", "gated"],
     )
 
-    skip_markers = ("embedding", "reranker", "rerank", "-gguf", "-awq", "-gptq")
-
-    cards = []
-    for model in models:
-        if any(marker in model.id.lower() for marker in skip_markers):
-            continue
-        config = model.config or {}
-        architectures = config.get("architectures") or []
-        model_type = config.get("model_type") or ""
-        support, note = classify(model_type, architectures)
-        if supported_only and support == "unsupported":
+    # A quantised or converted repack carries no config Diffuse can slice.
+    skip = ("-gguf", "-awq", "-gptq", "-mlx", "-onnx", "embedding", "reranker")
+    entries = []
+    for model in listed:
+        if any(marker in model.id.lower() for marker in skip):
             continue
         params = 0
         if model.safetensors is not None and model.safetensors.total:
             params = int(model.safetensors.total)
-        cards.append(
+        entries.append(
             {
                 "id": model.id,
-                "architecture": architectures[0] if architectures else "",
-                "model_type": model_type,
                 "params": params,
                 "downloads": int(model.downloads or 0),
                 "likes": int(model.likes or 0),
                 "gated": bool(model.gated),
-                "support": support,
-                "note": note,
             }
         )
+        if len(entries) >= limit * 2:
+            break
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        configs = list(pool.map(lambda e: _fetch_config(e["id"], hf_token), entries))
+
+    cards = []
+    for entry, config in zip(entries, configs):
+        if config is None:
+            # Gated without a token, or private: say so rather than hide it.
+            entry.update(
+                architecture="",
+                model_type="",
+                layers=0,
+                hidden_size=0,
+                vocab_size=0,
+                inputs=["text"],
+                outputs=["text"],
+                support="unknown",
+                note="config unreachable, a token may be required",
+            )
+        else:
+            entry.update(describe(config))
+        if supported_only and entry["support"] == "unsupported":
+            continue
+        cards.append(entry)
         if len(cards) >= limit:
             break
     return cards

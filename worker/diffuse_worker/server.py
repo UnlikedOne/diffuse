@@ -306,11 +306,33 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             from diffuse_worker.capacity import available_memory
 
             available, device = available_memory()
+            token = request.hf_token or self.config.hf_token or None
+            account = ""
+            if token:
+                try:
+                    from huggingface_hub import HfApi
+
+                    account = HfApi(token=token).whoami().get("name", "")
+                except Exception:
+                    account = ""
             return data_pb2.SearchModelsResponse(
                 ok=True,
-                models=[data_pb2.ModelCard(**card) for card in cards],
+                models=[
+                    # The descriptor may carry more than the wire cares about;
+                    # keep the fields the message actually declares.
+                    data_pb2.ModelCard(
+                        **{
+                            k: v
+                            for k, v in card.items()
+                            if k in data_pb2.ModelCard.DESCRIPTOR.fields_by_name
+                        }
+                    )
+                    for card in cards
+                ],
                 available_bytes=available,
                 device=device,
+                authenticated=bool(token),
+                account=account,
             )
         except Exception as exc:
             log.exception("model search failed")

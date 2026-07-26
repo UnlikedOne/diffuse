@@ -3,7 +3,7 @@ import pytest
 import torch
 from PIL import Image
 
-from diffuse_worker.catalog import classify
+from diffuse_worker.catalog import describe
 from diffuse_worker.inference import MediaEmbedder, SliceRunner
 from diffuse_worker.slicing import ModelSlice, is_multimodal, layer_count
 from transformers import AutoConfig
@@ -73,11 +73,59 @@ def test_embedded_media_flows_through_a_slice_as_activations():
     assert runner.cached_length("mm") == embeds.shape[1]
 
 
-def test_catalog_offers_multimodal_and_still_refuses_unsliceable():
-    assert classify("idefics3", ["Idefics3ForConditionalGeneration"])[0] == "validated"
-    assert classify("qwen2_audio", ["Qwen2AudioForConditionalGeneration"])[0] == "validated"
-    assert classify("mamba", ["MambaForCausalLM"])[0] == "unsupported"
-    assert classify("t5", ["T5ForConditionalGeneration"])[0] == "unsupported"
+def test_capability_is_read_off_the_config_not_a_list():
+    """No family is hardcoded: the same rules judge a checkpoint published today."""
+    vision = describe(
+        {
+            "architectures": ["Idefics3ForConditionalGeneration"],
+            "model_type": "idefics3",
+            "text_config": {"num_hidden_layers": 30, "hidden_size": 576},
+            "vision_config": {"num_hidden_layers": 12},
+        }
+    )
+    assert vision["support"] == "ready"
+    assert vision["inputs"] == ["text", "image"]
+    assert vision["layers"] == 30
+
+    # A model may reuse one tower for several modalities and say so only with a
+    # placeholder token id.
+    both = describe(
+        {
+            "architectures": ["Qwen2VLForConditionalGeneration"],
+            "text_config": {"num_hidden_layers": 28},
+            "vision_config": {},
+            "video_token_id": 151656,
+        }
+    )
+    assert both["inputs"] == ["text", "image", "video"]
+
+    encoder_decoder = describe(
+        {
+            "architectures": ["WhisperForConditionalGeneration"],
+            "num_hidden_layers": 12,
+            "is_encoder_decoder": True,
+        }
+    )
+    assert encoder_decoder["support"] == "unsupported"
+    assert "encoder" in encoder_decoder["note"]
+
+    recurrent = describe(
+        {"architectures": ["MambaForCausalLM"], "num_hidden_layers": 24, "state_size": 16}
+    )
+    assert recurrent["support"] == "unsupported"
+    assert "recurrent" in recurrent["note"]
+
+    not_generative = describe(
+        {"architectures": ["BertForMaskedLM"], "num_hidden_layers": 12}
+    )
+    assert not_generative["support"] == "unsupported"
+
+    # An architecture nobody has seen before is judged on its shape alone.
+    unseen = describe(
+        {"architectures": ["BrandNewForCausalLM"], "num_hidden_layers": 42}
+    )
+    assert unseen["support"] == "ready"
+    assert unseen["layers"] == 42
 
 
 class _FakeModel:

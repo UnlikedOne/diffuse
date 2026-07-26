@@ -153,7 +153,7 @@ impl WorkerHandle {
         query: &str,
         limit: u32,
         supported_only: bool,
-    ) -> anyhow::Result<(Vec<pb::ModelCard>, u64, String)> {
+    ) -> anyhow::Result<(Vec<pb::ModelCard>, u64, String, bool, String)> {
         let request = tonic::Request::new(pb::SearchModelsRequest {
             query: query.to_string(),
             limit,
@@ -164,7 +164,13 @@ impl WorkerHandle {
         if !response.ok {
             anyhow::bail!("model search failed: {}", response.error);
         }
-        Ok((response.models, response.available_bytes, response.device))
+        Ok((
+            response.models,
+            response.available_bytes,
+            response.device,
+            response.authenticated,
+            response.account,
+        ))
     }
 
     pub async fn embed_media(
