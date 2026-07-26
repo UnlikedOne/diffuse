@@ -200,3 +200,48 @@ def test_the_sliceable_stack_is_found_wherever_a_checkpoint_keeps_it():
     # A family nobody thought of is still found by its shape.
     assert _layer_count({"brand_new_config": {"num_hidden_layers": 42}}) == 42
     assert _layer_count({"nothing": {"unrelated": 3}}) is None
+
+
+def test_a_cross_attending_model_gets_two_caches_not_one():
+    """Self and cross attention must not share a cache slot.
+
+    A layer that reads an encoder looks up the same per-layer entry for both
+    kinds of attention when handed a plain cache, so the cross-attention keys
+    overwrite the self-attention ones and the model drifts without erroring.
+    """
+    from transformers import DynamicCache, EncoderDecoderCache
+
+    from diffuse_worker.inference import SliceRunner
+
+    plain = SliceRunner.__new__(SliceRunner)
+    plain._cross_attends = False
+    assert isinstance(SliceRunner._new_cache(plain), DynamicCache)
+
+    crossing = SliceRunner.__new__(SliceRunner)
+    crossing._cross_attends = True
+    assert isinstance(SliceRunner._new_cache(crossing), EncoderDecoderCache)
+
+
+def test_several_output_heads_become_several_streams():
+    """Text is one stream, not the shape of the system."""
+    import torch
+
+    from diffuse_worker.inference import SliceRunner
+
+    runner = SliceRunner.__new__(SliceRunner)
+    runner.slice = type(
+        "S",
+        (),
+        {
+            "norm": None,
+            "lm_head": torch.nn.ModuleList([torch.nn.Linear(8, 5) for _ in range(4)]),
+        },
+    )()
+    out = SliceRunner._head(runner, torch.randn(1, 3, 8))
+    assert out.shape == (1, 4, 3, 5), "four heads must stack into four streams"
+    assert SliceRunner.stream_count(runner) == 4
+
+    single = SliceRunner.__new__(SliceRunner)
+    single.slice = type("S", (), {"norm": None, "lm_head": torch.nn.Linear(8, 5)})()
+    assert SliceRunner._head(single, torch.randn(1, 3, 8)).shape == (1, 3, 5)
+    assert SliceRunner.stream_count(single) == 1

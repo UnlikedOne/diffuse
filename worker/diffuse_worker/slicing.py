@@ -26,6 +26,13 @@ _TOWER_MARKERS = (
     "modality_projection",
     "merger",
     "perceiver",
+    # An encoder-decoder carries its encoder the same way: a fixed cost that
+    # belongs with the endpoints, never a stack to split. Naming it here also
+    # keeps its blocks out of the layer count, since a T5 numbers them
+    # `.block.N.` and would otherwise be measured as decoder layers.
+    "text_encoder",
+    "audio_encoder",
+    "enc_to_dec_proj",
 )
 
 _TEXT_MODULE_NAMES = ("language_model", "text_model", "model", "transformer")
@@ -122,11 +129,6 @@ def _build_empty(klass, cfg):
     `from_config` only exists on the Auto classes; the concrete multimodal
     classes are constructed directly. Without this the partial loader falls
     over and every node downloads the whole checkpoint."""
-    if _sdpa_available():
-        try:
-            cfg._attn_implementation = "sdpa"
-        except Exception:
-            pass
     if hasattr(klass, "from_config"):
         return klass.from_config(cfg)
     return klass(cfg)
@@ -243,8 +245,19 @@ def _resolve_backbone(model):
         )
     layers_attr, layers = found
 
-    embed = model.get_input_embeddings()
+    # The embedding that feeds the sliced stack is the one attached to the
+    # module owning it. On an encoder-decoder, get_input_embeddings returns the
+    # encoder's, which would embed the wrong vocabulary entirely.
+    embed = getattr(backbone, "embed_tokens", None)
+    if embed is None:
+        embed = model.get_input_embeddings()
     lm_head = model.get_output_embeddings() or getattr(model, "lm_head", None)
+    if lm_head is None:
+        for holder in (model, getattr(model, "decoder", None)):
+            heads = getattr(holder, "lm_heads", None) if holder is not None else None
+            if heads is not None:
+                lm_head = heads
+                break
 
     rotary = None
     for name, child in backbone.named_children():
@@ -410,10 +423,10 @@ def _rebuild_meta_buffers(model, cfg):
 
 
 def _build_kwargs(hf_token, cache_dir):
-    kwargs = {"token": hf_token, "cache_dir": cache_dir}
-    if _sdpa_available():
-        kwargs["attn_implementation"] = "sdpa"
-    return kwargs
+    # No attention implementation is forced. Transformers already picks the
+    # fastest one a model supports, and pinning sdpa breaks the architectures
+    # that have no sdpa path, such as the T5 encoder MusicGen carries.
+    return {"token": hf_token, "cache_dir": cache_dir}
 
 
 def _sdpa_available() -> bool:

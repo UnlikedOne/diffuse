@@ -4,7 +4,7 @@ import time
 
 import torch
 import torch.nn.functional as F
-from transformers import DynamicCache
+from transformers import DynamicCache, EncoderDecoderCache
 
 
 class SliceRunner:
@@ -17,6 +17,15 @@ class SliceRunner:
         self._sessions_lock = threading.Lock()
         self._layer_params = self._detect_layer_params()
         self._cache_indices = self._detect_cache_indices()
+        # A layer that reads an encoder keeps two caches, one per kind of
+        # attention. Handing it a single cache makes cross-attention overwrite
+        # the self-attention entries of the same layer, silently.
+        self._cross_attends = "encoder_hidden_states" in self._layer_params
+
+    def _new_cache(self):
+        if self._cross_attends:
+            return EncoderDecoderCache(DynamicCache(), DynamicCache())
+        return DynamicCache()
 
     def _detect_cache_indices(self):
         if not self.slice.layers:
@@ -47,7 +56,7 @@ class SliceRunner:
             self._touch_session(session_id)
             cache = self.caches.get(session_id)
             if cache is None:
-                cache = DynamicCache()
+                cache = self._new_cache()
                 self.caches[session_id] = cache
                 self.seq_lens[session_id] = 0
             return cache, self.seq_lens.get(session_id, 0)
@@ -62,12 +71,42 @@ class SliceRunner:
         except (ValueError, TypeError):
             return set()
 
-    def _embed(self, input_ids: torch.Tensor) -> torch.Tensor:
-        hidden = self.slice.embed_tokens(input_ids)
-        if getattr(self.slice, "pos_embed", None) is not None:
-            positions = torch.arange(input_ids.shape[-1], device=input_ids.device)
-            hidden = hidden + self.slice.pos_embed(positions)
+    def _embed(self, input_ids: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+        tables = self.slice.embed_tokens
+        if isinstance(tables, torch.nn.ModuleList):
+            # One table per stream: an audio model embeds its codebooks
+            # separately and sums them, so the streams enter the stack as one.
+            ids = input_ids
+            if ids.dim() == 2:
+                ids = ids.unsqueeze(1).expand(-1, len(tables), -1)
+            hidden = sum(tables[k](ids[:, k]) for k in range(len(tables)))
+            positions = self._absolute_positions(ids, start_pos)
+        else:
+            hidden = tables(input_ids)
+            positions = self._absolute_positions(input_ids, start_pos)
+        if positions is not None:
+            hidden = hidden + positions
         return hidden
+
+    def _absolute_positions(self, ids: torch.Tensor, start_pos: int):
+        """Learned or sinusoidal positions added to the embedding.
+
+        Signatures differ: some take the ids and how far the session already
+        ran, others a plain index tensor. Both are tried rather than assumed."""
+        pos_embed = getattr(self.slice, "pos_embed", None)
+        if pos_embed is None:
+            return None
+        try:
+            return pos_embed(ids, start_pos)
+        except (TypeError, RuntimeError, IndexError):
+            pass
+        index = torch.arange(
+            start_pos, start_pos + ids.shape[-1], device=ids.device
+        )
+        try:
+            return pos_embed(index)
+        except Exception:
+            return None
 
     def _position_embeddings(self, hidden: torch.Tensor, start_pos: int, position_ids=None):
         if self.slice.rotary is None:
@@ -94,7 +133,9 @@ class SliceRunner:
             count = 3 if sections is None else max(3, len(sections))
             return self.slice.rotary(hidden, position_ids.expand(count, -1, -1))
 
-    def _run_layers(self, hidden, cache, start_pos, position_ids=None, rope_start=None):
+    def _run_layers(
+        self, hidden, cache, start_pos, position_ids=None, rope_start=None, memory=None
+    ):
         if self.slice.layers is not None and len(self.slice.layers) > 0:
             target = next(self.slice.layers[0].parameters()).dtype
             if hidden.dtype != target:
@@ -111,6 +152,10 @@ class SliceRunner:
             base_kwargs["position_ids"] = torch.arange(
                 start_pos, start_pos + seq_len, device=hidden.device
             )
+        if memory is not None and "encoder_hidden_states" in params:
+            # An encoder-decoder reads its encoder at every layer. The memory is
+            # session-scoped, sent once and held, exactly like the cache.
+            base_kwargs["encoder_hidden_states"] = memory.to(hidden.dtype)
         if cache is not None:
             if "past_key_values" in params:
                 base_kwargs["past_key_values"] = cache
@@ -128,8 +173,18 @@ class SliceRunner:
         return hidden
     
     def _head(self, hidden: torch.Tensor) -> torch.Tensor:
-        hidden = self.slice.norm(hidden)
-        return self.slice.lm_head(hidden)
+        if self.slice.norm is not None:
+            hidden = self.slice.norm(hidden)
+        heads = self.slice.lm_head
+        if isinstance(heads, torch.nn.ModuleList):
+            # One head per stream. Stacking on a leading axis keeps a single
+            # tensor on the wire whatever the number of streams.
+            return torch.stack([head(hidden) for head in heads], dim=1)
+        return heads(hidden)
+
+    def stream_count(self) -> int:
+        heads = self.slice.lm_head
+        return len(heads) if isinstance(heads, torch.nn.ModuleList) else 1
 
     def _topk_row(self, row: torch.Tensor, top_k: int):
         k = min(top_k, row.shape[-1])
@@ -144,7 +199,16 @@ class SliceRunner:
             return self.seq_lens.get(session_id, 0)
 
     @torch.inference_mode()
-    def run(self, tensor_in, is_input_ids, session_id="", use_cache=False, top_k=0, position_ids=None):
+    def run(
+        self,
+        tensor_in,
+        is_input_ids,
+        session_id="",
+        use_cache=False,
+        top_k=0,
+        position_ids=None,
+        memory=None,
+    ):
         cache = None
         start_pos = 0
         rope_start = 0
@@ -159,11 +223,13 @@ class SliceRunner:
         if tensor_in.device != device:
             tensor_in = tensor_in.to(device)
         if self.slice.is_first() and is_input_ids:
-            hidden = self._embed(tensor_in)
+            hidden = self._embed(tensor_in, start_pos)
         else:
             hidden = tensor_in
         seq_len = hidden.shape[1]
-        hidden = self._run_layers(hidden, cache, start_pos, position_ids, rope_start)
+        hidden = self._run_layers(
+            hidden, cache, start_pos, position_ids, rope_start, memory
+        )
         if cache is not None:
             with self._sessions_lock:
                 self.seq_lens[session_id] = start_pos + seq_len
@@ -187,7 +253,9 @@ class SliceRunner:
             caches.append(cache)
             lengths.append(start_pos)
 
-        if min(lengths) == 0 or len(self.slice.layers) == 0:
+        # The merged-cache path below assumes one cache per layer; a model that
+        # cross-attends keeps two and is run one session at a time.
+        if min(lengths) == 0 or len(self.slice.layers) == 0 or self._cross_attends:
             return [
                 self.run(
                     it.tensor_in,
