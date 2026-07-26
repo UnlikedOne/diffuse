@@ -26,18 +26,46 @@ _MEDIA_SECTIONS = {
 _RECURRENT_KEYS = ("state_size", "conv_kernel", "time_step_rank", "time_mix_extra_dim")
 
 
-def _text_section(config: dict) -> dict:
-    inner = config.get("text_config")
-    return inner if isinstance(inner, dict) else config
+# Where a checkpoint keeps the stack Diffuse slices. The names are tried in
+# order and then any sub-config that declares a depth, so a family nobody has
+# named here is still found by its shape.
+_DECODER_SECTIONS = (
+    "text_config",
+    "decoder_config",
+    "decoder",
+    "talker_config",
+    "language_model_config",
+    "llm_config",
+)
 
 
-def _layer_count(config: dict):
-    inner = _text_section(config)
-    for key in ("num_hidden_layers", "n_layer", "num_layers"):
-        value = inner.get(key)
+def _depth_of(section):
+    if not isinstance(section, dict):
+        return None
+    for key in ("num_hidden_layers", "n_layer"):
+        value = section.get(key)
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+def _text_section(config: dict) -> dict:
+    for name in _DECODER_SECTIONS:
+        section = config.get(name)
+        if _depth_of(section) is not None:
+            return section
+    if _depth_of(config) is not None:
+        return config
+    for name, section in config.items():
+        if "encoder" in name:
+            continue
+        if _depth_of(section) is not None:
+            return section
+    return config
+
+
+def _layer_count(config: dict):
+    return _depth_of(_text_section(config))
 
 
 def _architecture(config: dict) -> str:

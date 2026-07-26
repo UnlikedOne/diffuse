@@ -31,18 +31,53 @@ _TOWER_MARKERS = (
 _TEXT_MODULE_NAMES = ("language_model", "text_model", "model", "transformer")
 
 
+# Where a checkpoint keeps the stack Diffuse slices. Multimodal models put it
+# under `text_config`, MusicGen under `decoder`, others elsewhere; the names are
+# tried in order and then any sub-config that declares a depth, so a family
+# nobody has named here is still found by its shape.
+_DECODER_SECTIONS = (
+    "text_config",
+    "decoder_config",
+    "decoder",
+    "talker_config",
+    "language_model_config",
+    "llm_config",
+)
+
+_DEPTH_KEYS = ("num_hidden_layers", "n_layer")
+
+
+def _depth_of(section) -> int | None:
+    for key in _DEPTH_KEYS:
+        value = getattr(section, key, None) if not isinstance(section, dict) else section.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 def text_config(cfg):
     """The sub-config describing the decoder stack Diffuse slices.
 
-    Multimodal checkpoints keep the language model under `text_config` and
-    expose nothing at the root, so reading `num_hidden_layers` off the top
-    level raises on every one of them."""
-    return getattr(cfg, "text_config", None) or cfg
+    Reading `num_hidden_layers` off the top level fails on every checkpoint that
+    wraps its language model: multimodal ones expose nothing at the root, and an
+    encoder-decoder keeps two stacks side by side."""
+    for name in _DECODER_SECTIONS:
+        section = getattr(cfg, name, None)
+        if section is not None and _depth_of(section) is not None:
+            return section
+    if _depth_of(cfg) is not None:
+        return cfg
+    for name in dir(cfg):
+        if name.startswith("_") or "encoder" in name:
+            continue
+        section = getattr(cfg, name, None)
+        if hasattr(section, "to_dict") and _depth_of(section) is not None:
+            return section
+    return cfg
 
 
 def layer_count(cfg):
-    inner = text_config(cfg)
-    return getattr(inner, "num_hidden_layers", None) or getattr(inner, "n_layer", None)
+    return _depth_of(text_config(cfg))
 
 
 def is_multimodal(cfg) -> bool:

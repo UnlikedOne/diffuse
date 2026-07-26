@@ -175,3 +175,28 @@ def test_alignment_leaves_already_correct_names_alone():
     model = _FakeModel(["model.layers.0.mlp.up_proj.weight"])
     state = {"model.layers.0.mlp.up_proj.weight": 7}
     assert _align_state_keys(model, state) == state
+
+
+def test_the_sliceable_stack_is_found_wherever_a_checkpoint_keeps_it():
+    """No checkpoint is named here; each is found by the shape of its config."""
+    from diffuse_worker.catalog import _layer_count
+
+    # A plain decoder declares its depth at the root.
+    assert _layer_count({"num_hidden_layers": 24}) == 24
+    # A multimodal wrapper hides it under the text sub-config.
+    assert _layer_count({"text_config": {"num_hidden_layers": 30}}) == 30
+    # An encoder-decoder keeps two stacks side by side; the decoder is the one
+    # Diffuse would split, and the encoder must not be mistaken for it.
+    assert (
+        _layer_count(
+            {
+                "text_encoder": {"num_layers": 12, "num_hidden_layers": 12},
+                "decoder": {"num_hidden_layers": 24},
+                "audio_encoder": {"num_hidden_layers": 8},
+            }
+        )
+        == 24
+    )
+    # A family nobody thought of is still found by its shape.
+    assert _layer_count({"brand_new_config": {"num_hidden_layers": 42}}) == 42
+    assert _layer_count({"nothing": {"unrelated": 3}}) is None
