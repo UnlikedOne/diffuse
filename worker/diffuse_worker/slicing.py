@@ -347,13 +347,21 @@ def _rebuild_meta_buffers(model, cfg):
         # On a multimodal checkpoint the rotary buffers belong to the language
         # model, so they have to be rebuilt from the text sub-config; the root
         # config describes the wrapper and does not carry the right fields.
-        inner = text_config(cfg)
-        for attempt in (
-            lambda: type(module)(config=inner),
-            lambda: type(module)(inner),
-            lambda: type(module)(config=cfg),
-            lambda: type(module)(cfg),
-        ):
+        # A buffer can belong to the language model or to an encoder tower, and
+        # each is described by its own sub-config. Rebuilding a vision rotary
+        # from the text config, or from the root one, silently fails and sends
+        # the loader back to downloading the whole checkpoint.
+        candidates = [text_config(cfg)]
+        for sub in ("vision_config", "audio_config", "video_config"):
+            inner_cfg = getattr(cfg, sub, None)
+            if inner_cfg is not None:
+                candidates.append(inner_cfg)
+        candidates.append(cfg)
+        attempts = []
+        for inner in candidates:
+            attempts.append(lambda inner=inner: type(module)(config=inner))
+            attempts.append(lambda inner=inner: type(module)(inner))
+        for attempt in attempts:
             try:
                 rebuilt = attempt()
                 break

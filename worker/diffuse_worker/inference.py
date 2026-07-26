@@ -67,21 +67,37 @@ class SliceRunner:
             hidden = hidden + self.slice.pos_embed(positions)
         return hidden
 
-    def _position_embeddings(self, hidden: torch.Tensor, start_pos: int):
+    def _position_embeddings(self, hidden: torch.Tensor, start_pos: int, position_ids=None):
         if self.slice.rotary is None:
             return None
         seq_len = hidden.shape[1]
-        position_ids = torch.arange(
-            start_pos, start_pos + seq_len, device=hidden.device
-        ).unsqueeze(0)
-        return self.slice.rotary(hidden, position_ids)
+        if position_ids is None:
+            position_ids = torch.arange(
+                start_pos, start_pos + seq_len, device=hidden.device
+            ).unsqueeze(0)
+        else:
+            return self.slice.rotary(hidden, position_ids.to(hidden.device))
+        try:
+            return self.slice.rotary(hidden, position_ids)
+        except IndexError:
+            # Some multimodal decoders index position ids on several axes at
+            # once, time, height and width, rather than one. Giving each axis
+            # the same sequence is what these models do for text; it is only an
+            # approximation once media is in the prompt, where the axes are
+            # meant to differ.
+            axes = getattr(
+                getattr(self.slice.rotary, "config", None), "rope_scaling", None
+            )
+            sections = (axes or {}).get("mrope_section") if isinstance(axes, dict) else None
+            count = 3 if sections is None else max(3, len(sections))
+            return self.slice.rotary(hidden, position_ids.expand(count, -1, -1))
 
-    def _run_layers(self, hidden, cache, start_pos):
+    def _run_layers(self, hidden, cache, start_pos, position_ids=None):
         if self.slice.layers is not None and len(self.slice.layers) > 0:
             target = next(self.slice.layers[0].parameters()).dtype
             if hidden.dtype != target:
                 hidden = hidden.to(target)
-        pos_emb = self._position_embeddings(hidden, start_pos)
+        pos_emb = self._position_embeddings(hidden, start_pos, position_ids)
         seq_len = hidden.shape[1]
         params = self._layer_params
         base_kwargs = {}
@@ -124,7 +140,7 @@ class SliceRunner:
             return self.seq_lens.get(session_id, 0)
 
     @torch.inference_mode()
-    def run(self, tensor_in, is_input_ids, session_id="", use_cache=False, top_k=0):
+    def run(self, tensor_in, is_input_ids, session_id="", use_cache=False, top_k=0, position_ids=None):
         cache = None
         start_pos = 0
         if use_cache and session_id:
@@ -137,7 +153,7 @@ class SliceRunner:
         else:
             hidden = tensor_in
         seq_len = hidden.shape[1]
-        hidden = self._run_layers(hidden, cache, start_pos)
+        hidden = self._run_layers(hidden, cache, start_pos, position_ids)
         if cache is not None:
             with self._sessions_lock:
                 self.seq_lens[session_id] = start_pos + seq_len
@@ -281,15 +297,26 @@ def _feature_tensor(out, hidden_size):
     sit in `last_hidden_state` and the projected ones in `pooler_output`.
     Choosing by width rather than by attribute name keeps this working across
     models instead of encoding one model's habits."""
+    def as_tensor(value):
+        # A getter may hand back one tensor per attachment rather than a single
+        # block: Qwen2-VL splits its projected embeds per video. Joining them
+        # keeps the rows in the order the placeholders appear.
+        if isinstance(value, torch.Tensor):
+            return value
+        if isinstance(value, (tuple, list)) and value and all(
+            isinstance(v, torch.Tensor) for v in value
+        ):
+            return torch.cat([v.reshape(-1, v.shape[-1]) for v in value])
+        return None
+
     candidates = []
     for attr in ("pooler_output", "last_hidden_state", "image_embeds", "audio_embeds"):
-        value = getattr(out, attr, None)
-        if isinstance(value, torch.Tensor):
-            candidates.append(value)
-    if isinstance(out, torch.Tensor):
-        candidates.append(out)
-    elif isinstance(out, (tuple, list)):
-        candidates.extend(o for o in out if isinstance(o, torch.Tensor))
+        joined = as_tensor(getattr(out, attr, None))
+        if joined is not None:
+            candidates.append(joined)
+    joined = as_tensor(out)
+    if joined is not None:
+        candidates.append(joined)
 
     for tensor in candidates:
         if tensor.shape[-1] == hidden_size:
