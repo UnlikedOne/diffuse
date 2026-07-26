@@ -22,6 +22,9 @@ multimodal = [
     "torchvision>=0.17",
     "soundfile>=0.12",
     "librosa>=0.10",
+    # Video attachments arrive as a container and have to be decoded to frames.
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4",
     # Mistral checkpoints ship a tekken.json rather than a tokenizer_config,
     # so their processor cannot build a chat template without this.
     "mistral-common>=1.5",

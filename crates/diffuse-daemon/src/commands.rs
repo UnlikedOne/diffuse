@@ -638,9 +638,15 @@ pub async fn query(
             .iter()
             .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
             .collect();
-        let (embeddings, token_count) = tokenizer_worker
+        let (embeddings, token_count, positions) = tokenizer_worker
             .embed_media(prompt, media, true, true)
             .await?;
+        if positions.is_some() {
+            println!(
+                "  {} carrying multi-axis positions for the media layout",
+                "→".bright_blue()
+            );
+        }
         println!(
             "  {} embedded into {} hidden states",
             "→".bright_blue(),
@@ -648,8 +654,15 @@ pub async fn query(
         );
         println!("  {} generating over encrypted channel...", "→".bright_blue());
         println!();
-        orch.generate_from_embeddings(embeddings, max_tokens, &session_id, Some(eos), |_| {})
-            .await?
+        orch.generate_from_embeddings(
+            embeddings,
+            positions,
+            max_tokens,
+            &session_id,
+            Some(eos),
+            |_| {},
+        )
+        .await?
     };
 
     orch.clear_session(&session_id).await;

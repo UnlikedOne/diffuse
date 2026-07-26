@@ -13,6 +13,7 @@ class SliceRunner:
         self.caches = {}
         self.cache_seen = {}
         self.seq_lens = {}
+        self.rope_pos = {}
         self._sessions_lock = threading.Lock()
         self._layer_params = self._detect_layer_params()
         self._cache_indices = self._detect_cache_indices()
@@ -39,6 +40,7 @@ class SliceRunner:
             self.caches.pop(s, None)
             self.cache_seen.pop(s, None)
             self.seq_lens.pop(s, None)
+            self.rope_pos.pop(s, None)
 
     def _acquire_session(self, session_id):
         with self._sessions_lock:
@@ -92,12 +94,14 @@ class SliceRunner:
             count = 3 if sections is None else max(3, len(sections))
             return self.slice.rotary(hidden, position_ids.expand(count, -1, -1))
 
-    def _run_layers(self, hidden, cache, start_pos, position_ids=None):
+    def _run_layers(self, hidden, cache, start_pos, position_ids=None, rope_start=None):
         if self.slice.layers is not None and len(self.slice.layers) > 0:
             target = next(self.slice.layers[0].parameters()).dtype
             if hidden.dtype != target:
                 hidden = hidden.to(target)
-        pos_emb = self._position_embeddings(hidden, start_pos, position_ids)
+        pos_emb = self._position_embeddings(
+            hidden, start_pos if rope_start is None else rope_start, position_ids
+        )
         seq_len = hidden.shape[1]
         params = self._layer_params
         base_kwargs = {}
@@ -143,8 +147,14 @@ class SliceRunner:
     def run(self, tensor_in, is_input_ids, session_id="", use_cache=False, top_k=0, position_ids=None):
         cache = None
         start_pos = 0
+        rope_start = 0
         if use_cache and session_id:
             cache, start_pos = self._acquire_session(session_id)
+            with self._sessions_lock:
+                # Media can compress a long prompt into fewer rotary positions
+                # than it has cache entries, so the two counters diverge and the
+                # rotary one has to be tracked separately.
+                rope_start = self.rope_pos.get(session_id, start_pos)
         device = self.slice.torch_device()
         if tensor_in.device != device:
             tensor_in = tensor_in.to(device)
@@ -153,10 +163,14 @@ class SliceRunner:
         else:
             hidden = tensor_in
         seq_len = hidden.shape[1]
-        hidden = self._run_layers(hidden, cache, start_pos, position_ids)
+        hidden = self._run_layers(hidden, cache, start_pos, position_ids, rope_start)
         if cache is not None:
             with self._sessions_lock:
                 self.seq_lens[session_id] = start_pos + seq_len
+                if position_ids is not None:
+                    self.rope_pos[session_id] = int(position_ids.max()) + 1
+                else:
+                    self.rope_pos[session_id] = rope_start + seq_len
         if not self.slice.is_last():
             return hidden
         if top_k > 0:
@@ -269,6 +283,7 @@ class SliceRunner:
             self.caches.pop(session_id, None)
             self.cache_seen.pop(session_id, None)
             self.seq_lens.pop(session_id, None)
+            self.rope_pos.pop(session_id, None)
 
 MODALITIES = (
     (
@@ -372,6 +387,29 @@ class MediaEmbedder:
             f"media features are {features.shape[-1]} wide but the decoder expects "
             f"{hidden_size}, and no projector in the tower bridged them"
         )
+
+    def rope_positions(self, inputs):
+        """The multi-axis positions this model wants, when it wants any.
+
+        A decoder that indexes time, height and width separately cannot rebuild
+        them from a sequence length: they depend on how the media was laid out.
+        They are computed here, where the grids are, and travel with the
+        activations."""
+        model = self.slice.model
+        for holder in (getattr(model, "model", None), model):
+            getter = getattr(holder, "get_rope_index", None)
+            if getter is None:
+                continue
+            try:
+                accepted = set(inspect.signature(getter).parameters)
+                kwargs = {k: v for k, v in inputs.items() if k in accepted}
+                result = getter(**kwargs)
+            except Exception:
+                continue
+            positions = result[0] if isinstance(result, tuple) else result
+            if isinstance(positions, torch.Tensor) and positions.dim() == 3:
+                return positions
+        return None
 
     @torch.inference_mode()
     def embed(self, inputs) -> torch.Tensor:

@@ -101,7 +101,23 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         try:
             tensor_in = proto_to_tensor(request.activations)
             is_input_ids = tensor_in.dtype == torch.int64
-            if self.scheduler is not None:
+            positions = (
+                proto_to_tensor(request.position_ids)
+                if request.HasField("position_ids")
+                else None
+            )
+            if positions is not None:
+                # Multi-axis positions cannot be batched with other sessions,
+                # which carry their own; run this one on its own.
+                out = self.runner.run(
+                    tensor_in,
+                    is_input_ids=is_input_ids,
+                    session_id=request.session_id,
+                    use_cache=request.use_cache,
+                    top_k=request.top_k,
+                    position_ids=positions,
+                )
+            elif self.scheduler is not None:
                 out = self.scheduler.submit(
                     tensor_in,
                     is_input_ids=is_input_ids,
@@ -206,7 +222,26 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     samples, _rate = soundfile.read(io.BytesIO(item.data))
                     audio.append(samples)
                 elif item.kind == "video":
-                    videos.append(item.data)
+                    # A processor wants decoded frames, not a container. The
+                    # bytes are written out because the decoders read files.
+                    import tempfile
+
+                    import imageio.v2 as iio
+
+                    suffix = "." + (item.mime.split("/")[-1] or "mp4")
+                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+                        fh.write(item.data)
+                        clip_path = fh.name
+                    try:
+                        import numpy as np
+
+                        videos.append(
+                            [np.asarray(f) for f in iio.mimread(clip_path, memtest=False)]
+                        )
+                    finally:
+                        import os
+
+                        os.unlink(clip_path)
                 else:
                     from PIL import Image
 
@@ -243,11 +278,16 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 kwargs["videos"] = videos
             inputs = self.slice.processor(**kwargs)
 
-            embeds = MediaEmbedder(self.slice).embed(inputs)
+            embedder = MediaEmbedder(self.slice)
+            embeds = embedder.embed(inputs)
+            positions = embedder.rope_positions(inputs)
             return data_pb2.EmbedMediaResponse(
                 ok=True,
                 embeddings=tensor_to_proto(embeds, accepts_bf16=request.accepts_bf16),
                 token_count=int(embeds.shape[1]),
+                position_ids=(
+                    tensor_to_proto(positions) if positions is not None else None
+                ),
             )
         except Exception as exc:
             log.exception("media embedding failed")

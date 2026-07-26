@@ -115,6 +115,7 @@ async fn generation_survives_dead_replica() {
         last_forward_network_ms: 0,
         chain_enabled: false,
         session_prefill: None,
+        session_positions: None,
     };
 
     let (ids, _eos) = orch

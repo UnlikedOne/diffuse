@@ -111,6 +111,7 @@ async fn health_sweep_detects_death_proactively() {
         last_forward_network_ms: 0,
         chain_enabled: false,
         session_prefill: None,
+        session_positions: None,
     };
 
     orch.health_sweep().await;

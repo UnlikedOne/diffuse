@@ -94,7 +94,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
 
     // Client executes slice 0:2 locally -> activations. Tokens stay here.
     let local_activations = client_w
-        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false)
+        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false, None)
         .await
         .expect("local first-slice execution");
 
@@ -134,6 +134,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
         &local_activations,
         0,
         false,
+        None,
     )
     .await
     .expect("remote completion over encrypted channel");

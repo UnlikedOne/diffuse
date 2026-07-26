@@ -60,6 +60,7 @@ pub async fn run_demo(
         session_kx: std::sync::Arc::new(KeyExchange::generate()),
         chain_enabled: true,
         session_prefill: None,
+        session_positions: None,
         last_forward_compute_ms: 0,
         last_forward_network_ms: 0,
     };

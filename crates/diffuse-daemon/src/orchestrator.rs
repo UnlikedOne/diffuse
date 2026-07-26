@@ -95,6 +95,8 @@ pub struct Orchestrator {
     /// recovered by replaying the prefix, and for a multimodal prompt the
     /// prefix is not expressible as token ids.
     pub session_prefill: Option<Tensor>,
+    /// Multi-axis positions belonging to that prefill, replayed with it.
+    pub session_positions: Option<Tensor>,
 }
 
 pub const DECODE_TOP_K: u32 = 8;
@@ -157,6 +159,7 @@ impl Stage {
         session_kx: &KeyExchange,
         top_k: u32,
         accepts_bf16: bool,
+        position_ids: Option<&Tensor>,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -174,7 +177,7 @@ impl Stage {
                     worker
                         .run_slice(
                             model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
-                            accepts_bf16,
+                            accepts_bf16, position_ids.cloned(),
                         )
                         .await
                         .map(|t| {
@@ -204,6 +207,7 @@ impl Stage {
                                 &input,
                                 top_k,
                                 accepts_bf16,
+                                position_ids,
                             )
                             .await
                         }
@@ -213,6 +217,7 @@ impl Stage {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
                                         start, end, session_id, &input, top_k, accepts_bf16,
+                                        position_ids,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -433,6 +438,7 @@ impl Orchestrator {
         input: &Tensor,
         session_id: &str,
         top_k: u32,
+        position_ids: Option<&Tensor>,
     ) -> anyhow::Result<Option<Tensor>> {
         if self.stages.len() < 2 {
             return Ok(None);
@@ -481,6 +487,7 @@ impl Orchestrator {
             head_hop.top_k,
             rest,
             head_accepts_bf16,
+            position_ids,
         )
         .await;
 
@@ -546,8 +553,23 @@ impl Orchestrator {
         use_cache: bool,
         top_k: u32,
     ) -> anyhow::Result<Tensor> {
+        self.forward_positioned(input, session_id, use_cache, top_k, None)
+            .await
+    }
+
+    pub async fn forward_positioned(
+        &mut self,
+        input: Tensor,
+        session_id: &str,
+        use_cache: bool,
+        top_k: u32,
+        position_ids: Option<Tensor>,
+    ) -> anyhow::Result<Tensor> {
         if self.chain_enabled && use_cache {
-            match self.forward_chained(&input, session_id, top_k).await {
+            match self
+                .forward_chained(&input, session_id, top_k, position_ids.as_ref())
+                .await
+            {
                 Ok(Some(out)) => return Ok(out),
                 Ok(None) => {}
                 Err(e) => return Err(e),
@@ -581,6 +603,7 @@ impl Orchestrator {
                     &session_kx,
                     stage_top_k,
                     consumer_accepts[idx],
+                    position_ids.as_ref(),
                 )
                 .await?;
             compute_sum += stage.last_compute_ms;
@@ -617,7 +640,9 @@ impl Orchestrator {
                     // Media has to go back through first: the surviving nodes
                     // hold no cache, and the picture is not in the token ids.
                     if let Some(prefill) = self.session_prefill.clone() {
-                        self.forward_tensor(prefill, session_id, true, 0).await?;
+                        let positions = self.session_positions.clone();
+                        self.forward_positioned(prefill, session_id, true, 0, positions)
+                            .await?;
                     }
                     ids = full_ids;
                 }
@@ -633,6 +658,7 @@ impl Orchestrator {
     pub async fn generate_from_embeddings<F>(
         &mut self,
         prefill: Tensor,
+        position_ids: Option<Tensor>,
         max_new_tokens: usize,
         session_id: &str,
         eos_id: Option<i64>,
@@ -642,14 +668,16 @@ impl Orchestrator {
         F: FnMut(i64),
     {
         self.session_prefill = Some(prefill.clone());
+        self.session_positions = position_ids.clone();
         let logits = self
-            .forward_tensor(prefill, session_id, true, DECODE_TOP_K)
+            .forward_positioned(prefill, session_id, true, DECODE_TOP_K, position_ids)
             .await?;
         let mut next = next_token(&logits)?;
         let mut produced = vec![next];
         on_token(next);
         if Some(next) == eos_id {
             self.session_prefill = None;
+            self.session_positions = None;
             return Ok(produced);
         }
 
@@ -665,6 +693,7 @@ impl Orchestrator {
             on_token(next);
         }
         self.session_prefill = None;
+        self.session_positions = None;
         Ok(produced)
     }
 
@@ -966,6 +995,7 @@ pub async fn build_from_registry(
         last_forward_network_ms: 0,
         chain_enabled: true,
         session_prefill: None,
+        session_positions: None,
     })
 }
 

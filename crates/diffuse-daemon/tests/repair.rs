@@ -117,6 +117,7 @@ async fn network_self_heals_after_replica_death() {
         last_forward_network_ms: 0,
         chain_enabled: false,
         session_prefill: None,
+        session_positions: None,
     };
 
     orch.health_sweep().await;

@@ -21,6 +21,7 @@ message ComputeRequest {
   uint32 top_k = 7;
   repeated Hop route = 8;
   bool accepts_bf16 = 9;
+  bytes encrypted_position_ids = 10;
 }
 
 message ComputeResponse {

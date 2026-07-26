@@ -3,6 +3,8 @@ import re
 import psutil
 from huggingface_hub import get_safetensors_metadata
 
+from diffuse_worker.slicing import _is_tower_tensor
+
 _DTYPE_BYTES = {
     "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
     "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1,
@@ -29,7 +31,12 @@ def profile_model(model_id: str, load_dtype: str = "bfloat16", hf_token: str | N
     for file_meta in meta.files_metadata.values():
         for name, tensor in file_meta.tensors.items():
             size = tensor.parameter_count * per
-            m = _LAYER_RE.search(name)
+            # An encoder tower numbers its own blocks, so counting them as
+            # decoder layers overstates the model: Qwen2-VL would be profiled
+            # with 32 layers for a 28 layer decoder, and the assignment would
+            # hand out a slice that does not exist. The tower is a fixed cost
+            # carried by whoever holds the embeddings.
+            m = None if _is_tower_tensor(name) else _LAYER_RE.search(name)
             if m:
                 idx = int(m.group(1))
                 per_layer_bytes[idx] = per_layer_bytes.get(idx, 0) + size

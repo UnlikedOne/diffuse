@@ -70,6 +70,7 @@ impl WorkerHandle {
         use_cache: bool,
         top_k: u32,
         accepts_bf16: bool,
+        position_ids: Option<Tensor>,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -81,6 +82,7 @@ impl WorkerHandle {
             use_cache,
             top_k,
             accepts_bf16,
+            position_ids,
         });
         let response = self.client.run_slice(request).await?.into_inner();
         if !response.ok {
@@ -171,7 +173,7 @@ impl WorkerHandle {
         media: Vec<(String, Vec<u8>, String)>,
         apply_chat_template: bool,
         accepts_bf16: bool,
-    ) -> anyhow::Result<(Tensor, u32)> {
+    ) -> anyhow::Result<(Tensor, u32, Option<Tensor>)> {
         let attachments: Vec<pb::MediaAttachment> = media
             .into_iter()
             .map(|(kind, data, mime)| pb::MediaAttachment { kind, data, mime })
@@ -190,7 +192,7 @@ impl WorkerHandle {
         let embeddings = response
             .embeddings
             .ok_or_else(|| anyhow::anyhow!("worker returned no embeddings"))?;
-        Ok((embeddings, response.token_count))
+        Ok((embeddings, response.token_count, response.position_ids))
     }
 
     pub async fn encode_messages(

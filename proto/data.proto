@@ -18,6 +18,7 @@ message SliceRequest {
   bool use_cache = 7;
   uint32 top_k = 8;
   bool accepts_bf16 = 9;
+  Tensor position_ids = 10;
 }
 
 message SliceResponse {
@@ -115,6 +116,7 @@ message EmbedMediaResponse {
   string error = 2;
   Tensor embeddings = 3;
   uint32 token_count = 4;
+  Tensor position_ids = 5;
 }
 
 message ModelCard {

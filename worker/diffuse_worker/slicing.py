@@ -437,8 +437,18 @@ class ModelSlice:
                         self._load_partial(
                             model_id, cfg, plan, 0, 0, total, tied, hf_token, cache_dir
                         )
+                    else:
+                        raise RuntimeError("no partial plan available")
                 except Exception as exc:
-                    print(f"could not load the media frontend ({exc}), text only")
+                    # Some towers hold buffers that cannot be rebuilt from a
+                    # config, so the slice-by-slice loader cannot materialise
+                    # them. Falling back costs the whole checkpoint but leaves
+                    # the client able to embed media, which is the point.
+                    print(f"partial media frontend unavailable ({exc}), loading in full")
+                    try:
+                        self._load_full(model_id, 0, 0, total, hf_token, cache_dir)
+                    except Exception as inner:
+                        print(f"could not load the media frontend ({inner}), text only")
             return LoadedSlice(model_id, 0, 0, total)
 
         if end_layer > total:
