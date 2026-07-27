@@ -56,6 +56,12 @@ cost has not been established.
 
 ## What only works on some models
 
-Diffuse serves dense text transformers. Multimodal, mixture-of-experts, and
-state-space architectures are unsupported or unproven. See
-[choosing a model](/guides/choosing-a-model).
+Diffuse serves any model whose computation is an ordered stack of layers that
+passes one tensor between them. That covers ordinary chat models, models that
+read images, audio or video, and encoder-decoders such as Whisper and MusicGen.
+
+It does not cover U-Net diffusion, recurrent stacks such as Mamba, or anything
+requiring `trust_remote_code`. Mixture-of-experts remains unproven: no such
+model has been run end to end here. Image generation is unverified for the same
+reason. See [what Diffuse can run](/concepts/model-support) for the rule and
+[choosing a model](/guides/choosing-a-model) for the practical advice.

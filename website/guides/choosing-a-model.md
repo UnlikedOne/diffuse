@@ -13,18 +13,27 @@ stack of transformer layers that runs strictly front to back.
 - **Dense text models work.** A flat list of decoder layers, one embedding table
   at the front, a language-modelling head at the back. Most instruction-tuned chat
   models fall here.
+- **Models that read media work.** A vision or audio tower is an endpoint, not a
+  stack to split: it rides with the slice holding the embeddings, and on a client
+  that means your own machine. SmolVLM, Qwen2-VL and Voxtral have all been run
+  end to end.
+- **Encoder-decoders work.** Whisper and MusicGen have two stacks; the decoder is
+  what gets split, and the encoder's output travels once per session. The encoder
+  runs where the question is asked.
 
 ## What does not
 
-- **Multimodal models do not work yet.** A model with separate vision or audio
-  towers keeps its layer count inside a nested config the slicer does not read,
-  and the extra weights would be downloaded and never used.
+- **U-Net diffusion does not work.** Stable Diffusion and its family connect
+  across resolutions, so what passes between two points is several tensors at
+  different scales rather than one. It does not fit a chain.
+- **State space models do not work.** Mamba-style architectures carry a recurrent
+  state between layers. The pipeline only forwards a tensor, so the state is lost
+  at every boundary. This is an engineering gap rather than a barrier.
 - **Mixture-of-experts is unproven.** Slicing may work if experts belong to a
   layer and fail if routing spans layers. None has been verified end to end, and
   they are heavy per layer anyway.
-- **State space models do not work.** Mamba-style architectures carry a recurrent
-  state between layers. The pipeline only forwards a tensor, so the state is lost
-  at every boundary.
+- **`trust_remote_code` is refused.** A checkpoint that ships its own Python
+  would run on volunteer machines. That is a security decision, not a limitation.
 
 If the loader cannot find the layer list, you will see `cannot locate a list of N
 transformer layers`. That means the structure does not match what the slicer

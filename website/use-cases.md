@@ -43,8 +43,10 @@ replies at scale.
 
 ### High-throughput production serving
 
-There is no batching scheduler, autoscaling, or SLA. This is a prototype for
-privacy and decentralization, not a production inference platform.
+Concurrent requests on a node are grouped into one pass, which roughly doubles
+aggregate throughput, but there is no autoscaling and no SLA. This is a
+prototype for privacy and decentralization, not a production inference
+platform.
 
 ### Anonymity
 
@@ -53,8 +55,10 @@ identity or the fact of use, Diffuse alone does not provide that.
 
 ### Anything requiring unsupported model types
 
-Multimodal, mixture-of-experts, and state-space models do not work today. See
-[choosing a model](/guides/choosing-a-model).
+U-Net diffusion, recurrent stacks such as Mamba, and models shipping their own
+Python do not work, the last by decision rather than by limitation.
+Mixture-of-experts is unproven. See
+[what Diffuse can run](/concepts/model-support).
 
 ## A realistic mental model
 

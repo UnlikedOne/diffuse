@@ -23,9 +23,13 @@ privacy and decentralization, not speed. See the [benchmarks](/benchmarks).
 
 ### Which models work?
 
-Dense text transformers, such as most instruction-tuned chat models. Multimodal,
-mixture-of-experts, and state-space models are unsupported or unproven. See
-[choosing a model](/guides/choosing-a-model).
+Ordinary chat models, models that read images, audio or video, and
+encoder-decoders such as Whisper. A few also answer with sound rather than
+words. What decides is the shape of the computation, not a list of approved
+names: see [what Diffuse can run](/concepts/model-support).
+
+U-Net diffusion, recurrent stacks such as Mamba, and checkpoints that ship
+their own Python do not work. Mixture-of-experts is unproven.
 
 ## Privacy
 
