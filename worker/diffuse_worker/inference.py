@@ -17,9 +17,6 @@ class SliceRunner:
         self._sessions_lock = threading.Lock()
         self._layer_params = self._detect_layer_params()
         self._cache_indices = self._detect_cache_indices()
-        # A layer that reads an encoder keeps two caches, one per kind of
-        # attention. Handing it a single cache makes cross-attention overwrite
-        # the self-attention entries of the same layer, silently.
         self._cross_attends = "encoder_hidden_states" in self._layer_params
 
     def _new_cache(self):
@@ -74,8 +71,6 @@ class SliceRunner:
     def _embed(self, input_ids: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         tables = self.slice.embed_tokens
         if isinstance(tables, torch.nn.ModuleList):
-            # One table per stream: an audio model embeds its codebooks
-            # separately and sums them, so the streams enter the stack as one.
             ids = input_ids
             if ids.dim() == 2:
                 ids = ids.unsqueeze(1).expand(-1, len(tables), -1)
@@ -121,11 +116,6 @@ class SliceRunner:
         try:
             return self.slice.rotary(hidden, position_ids)
         except IndexError:
-            # Some multimodal decoders index position ids on several axes at
-            # once, time, height and width, rather than one. Giving each axis
-            # the same sequence is what these models do for text; it is only an
-            # approximation once media is in the prompt, where the axes are
-            # meant to differ.
             axes = getattr(
                 getattr(self.slice.rotary, "config", None), "rope_scaling", None
             )
@@ -153,8 +143,6 @@ class SliceRunner:
                 start_pos, start_pos + seq_len, device=hidden.device
             )
         if memory is not None and "encoder_hidden_states" in params:
-            # An encoder-decoder reads its encoder at every layer. The memory is
-            # session-scoped, sent once and held, exactly like the cache.
             base_kwargs["encoder_hidden_states"] = memory.to(hidden.dtype)
         if cache is not None:
             if "past_key_values" in params:
@@ -177,8 +165,6 @@ class SliceRunner:
             hidden = self.slice.norm(hidden)
         heads = self.slice.lm_head
         if isinstance(heads, torch.nn.ModuleList):
-            # One head per stream. Stacking on a leading axis keeps a single
-            # tensor on the wire whatever the number of streams.
             return torch.stack([head(hidden) for head in heads], dim=1)
         return heads(hidden)
 
@@ -215,9 +201,6 @@ class SliceRunner:
         if use_cache and session_id:
             cache, start_pos = self._acquire_session(session_id)
             with self._sessions_lock:
-                # Media can compress a long prompt into fewer rotary positions
-                # than it has cache entries, so the two counters diverge and the
-                # rotary one has to be tracked separately.
                 rope_start = self.rope_pos.get(session_id, start_pos)
         device = self.slice.torch_device()
         if tensor_in.device != device:
@@ -242,9 +225,6 @@ class SliceRunner:
         if top_k > 0:
             logits = self._head(hidden[:, -1:, :])
             if logits.dim() == 4:
-                # [batch, streams, position, vocab]: one shortlist per stream,
-                # so a model answering on four codebooks sends four hundred
-                # bytes instead of four full vocabularies.
                 return [
                     self._topk_row(logits[0, stream, -1], top_k)
                     for stream in range(logits.shape[1])
@@ -261,8 +241,6 @@ class SliceRunner:
             caches.append(cache)
             lengths.append(start_pos)
 
-        # The merged-cache path below assumes one cache per layer; a model that
-        # cross-attends keeps two and is run one session at a time.
         if min(lengths) == 0 or len(self.slice.layers) == 0 or self._cross_attends:
             return [
                 self.run(
@@ -389,9 +367,6 @@ def _feature_tensor(out, hidden_size):
     Choosing by width rather than by attribute name keeps this working across
     models instead of encoding one model's habits."""
     def as_tensor(value):
-        # A getter may hand back one tensor per attachment rather than a single
-        # block: Qwen2-VL splits its projected embeds per video. Joining them
-        # keeps the rows in the order the placeholders appear.
         if isinstance(value, torch.Tensor):
             return value
         if isinstance(value, (tuple, list)) and value and all(

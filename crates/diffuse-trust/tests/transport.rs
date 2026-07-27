@@ -5,8 +5,6 @@ fn two_nodes_derive_same_secret_without_transmitting_it() {
     let alice = KeyExchange::generate();
     let bob = KeyExchange::generate();
 
-    // Each derives the shared secret from their own private key
-    // and the other's public key. Only public keys are ever exchanged.
     let alice_secret = alice.shared_secret(&bob.public_bytes());
     let bob_secret = bob.shared_secret(&alice.public_bytes());
 
@@ -23,7 +21,6 @@ fn third_party_cannot_derive_the_secret() {
     let eve = KeyExchange::generate();
 
     let real_secret = alice.shared_secret(&bob.public_bytes());
-    // Eve only sees the public keys on the wire. She tries with her own key.
     let eve_attempt = eve.shared_secret(&bob.public_bytes());
 
     assert_ne!(
@@ -43,7 +40,6 @@ fn message_encrypted_by_one_is_readable_by_the_other() {
     let plaintext = b"activation tensor bytes for slice 12:24";
     let ciphertext = encrypt(&alice_secret, plaintext).expect("encrypt");
 
-    // The ciphertext on the wire is not the plaintext.
     assert_ne!(&ciphertext[..], &plaintext[..], "wire data must be encrypted");
 
     let recovered = decrypt(&bob_secret, &ciphertext).expect("decrypt");
@@ -76,7 +72,6 @@ fn tampered_ciphertext_is_rejected() {
     let secret = alice.shared_secret(&bob.public_bytes());
     let mut ciphertext = encrypt(&secret, b"integrity matters").expect("encrypt");
 
-    // Flip a byte in the ciphertext body.
     let last = ciphertext.len() - 1;
     ciphertext[last] ^= 0xff;
 

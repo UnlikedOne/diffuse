@@ -2,9 +2,6 @@ use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
 
 fn peer(endpoint: &str, last_seen_ms: u64) -> Peer {
     Peer {
-        // Identity follows the endpoint: distinct endpoints are distinct nodes,
-        // while re-announcing the same endpoint keeps the same node_id (which is
-        // what the registry keys on).
         node_id: endpoint.as_bytes().to_vec(),
         daemon_endpoint: endpoint.to_string(),
         worker_endpoint: format!("{}-worker", endpoint),

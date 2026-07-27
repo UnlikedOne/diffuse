@@ -79,7 +79,6 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
     let mid = full / 2;
     w.load_slice(MODEL, 0, mid, "").await.expect("load slice");
 
-    // Host daemon identity and compute server, driving its local worker.
     let host_kx = Arc::new(KeyExchange::generate());
     let host_kx_public = host_kx.public_bytes();
     let worker = Arc::new(Mutex::new(w));
@@ -87,7 +86,6 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
     let _server = spawn_compute_server(addr, Arc::clone(&host_kx), worker, MODEL.to_string());
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Requester daemon: its own kx identity, delegates a slice to the host.
     let my_kx = KeyExchange::generate();
     let input = ids_tensor(&[9707, 11, 1879]);
 

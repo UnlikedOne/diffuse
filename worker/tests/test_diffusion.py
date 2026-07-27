@@ -79,8 +79,6 @@ def test_patches_stay_close_to_the_whole_sequence(tmp_path):
     stack.load(str(tmp_path), 0, 4)
     sequence = hidden.shape[1]
 
-    # A first pass over the whole sequence fills the stale buffers, the way the
-    # first denoising step does before any patch is ever cut.
     stack.run_patch("s", hidden, 0, sequence, arguments)
 
     size = sequence // 4

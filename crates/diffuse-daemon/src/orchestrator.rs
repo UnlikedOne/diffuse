@@ -91,11 +91,7 @@ pub struct Orchestrator {
     pub last_forward_compute_ms: u64,
     pub last_forward_network_ms: u64,
     pub chain_enabled: bool,
-    /// Embedded media for the session in flight. Kept because a broken route is
-    /// recovered by replaying the prefix, and for a multimodal prompt the
-    /// prefix is not expressible as token ids.
     pub session_prefill: Option<Tensor>,
-    /// Multi-axis positions belonging to that prefill, replayed with it.
     pub session_positions: Option<Tensor>,
     pub patch: Option<crate::compute::Patch>,
 }
@@ -295,8 +291,6 @@ impl Stage {
         anyhow::bail!("all replicas dead for slice {}:{}", start, end)
     }
 
-    /// Whether the replica that will consume this stage's input can parse the
-    /// current wire format. A peer that predates it must be fed float32.
     pub fn accepts_bf16(&self) -> bool {
         self.replicas
             .iter()
@@ -552,11 +546,6 @@ impl Orchestrator {
             .await
     }
 
-    /// Push an already-embedded sequence through the pipeline.
-    ///
-    /// Media never becomes token ids: the client turns a picture or a recording
-    /// into hidden states itself, and those enter the route in place of a
-    /// prompt, which the first stage passes straight to its layers.
     pub async fn forward_tensor(
         &mut self,
         input: Tensor,
@@ -596,9 +585,6 @@ impl Orchestrator {
         let model_id = self.model_id.clone();
         let session_kx = self.session_kx.clone();
         let last_stage = self.stages.len().saturating_sub(1);
-        // Each stage must emit a format the *next* stage can parse. The last
-        // stage answers the client, which either asked for top-k or accepts the
-        // float32 logits every version understands.
         let consumer_accepts: Vec<bool> = (0..self.stages.len())
             .map(|i| {
                 self.stages
@@ -670,8 +656,6 @@ impl Orchestrator {
                         MAX_REPLAYS
                     );
                     self.clear_session(session_id).await;
-                    // Media has to go back through first: the surviving nodes
-                    // hold no cache, and the picture is not in the token ids.
                     if let Some(prefill) = self.session_prefill.clone() {
                         let positions = self.session_positions.clone();
                         self.forward_positioned(prefill, session_id, true, 0, positions, None)
@@ -684,28 +668,16 @@ impl Orchestrator {
         }
     }
 
-    /// One pass for a model whose answer is not text.
-    ///
-    /// The orchestrator stays ignorant here: it relays a tensor in and returns
-    /// whatever the last slice produced, however many streams that is. What the
-    /// streams mean, and what to feed next, is decided on the machine that
-    /// asked, where the model's own code lives.
     pub async fn forward_streams(
         &mut self,
         input: Tensor,
         memory: Option<Tensor>,
         session_id: &str,
     ) -> anyhow::Result<Tensor> {
-        // Ask for shortlists rather than whole vocabularies: the client only
-        // ever reads the best candidates, whatever the number of streams.
         self.forward_positioned(input, session_id, true, DECODE_TOP_K, None, memory)
             .await
     }
 
-    /// Generate from an already-embedded prompt, streaming each token out.
-    ///
-    /// The prefill carries whatever the client embedded, text and media alike;
-    /// decoding then continues on token ids like any other session.
     pub async fn generate_from_embeddings<F>(
         &mut self,
         prefill: Tensor,
@@ -936,10 +908,6 @@ pub async fn build_from_registry(
         anyhow::bail!("no peers in registry serve model {}", model_id);
     }
 
-    // Refuse to build a route through a model the network only partially holds.
-    // Without this, a set of slices that stops short of `total_layers` (or leaves
-    // an interior hole) would yield an orchestrator that forwards activations
-    // into a dead end and returns garbage. Fail here, naming the missing ranges.
     if let Some(cap) = crate::capacity::analyze(registry)
         .into_iter()
         .find(|c| c.model_id == model_id)

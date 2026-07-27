@@ -81,8 +81,6 @@ class _PlainTokenizer:
 
 
 def test_prompt_survives_a_multimodal_chat_template():
-    # Both halves of the checkpoint template parts; only the processor is asked
-    # with parts, so asking the tokenizer with a string loses the question.
     servicer = InferenceWorkerServicer(WorkerConfig())
     servicer.slice.processor = _PartsOnlyTemplate()
     servicer.slice.tokenizer = _PartsOnlyTemplate()

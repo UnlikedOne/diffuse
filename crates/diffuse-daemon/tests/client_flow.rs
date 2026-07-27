@@ -54,10 +54,8 @@ async fn client_generates_with_network_blind_to_prompt_and_output() {
     client_w.load_slice(MODEL, 0, 2, "").await.expect("client slice");
     host_w.load_slice(MODEL, 2, full, "").await.expect("host slice");
 
-    // Prompt encoded locally on the client. Tokens never leave.
     let (ids, _eos) = client_w.encode("Name a color.", true).await.expect("encode");
 
-    // Host exposes encrypted compute over its local worker.
     let host_kx = Arc::new(KeyExchange::generate());
     let host_pub = host_kx.public_bytes();
     let addr: std::net::SocketAddr = "127.0.0.1:50322".parse().unwrap();
@@ -82,7 +80,6 @@ async fn client_generates_with_network_blind_to_prompt_and_output() {
     let out = session.generate(&ids, 10, "priv-session", Some(QWEN_EOS)).await.expect("gen");
     assert!(out.len() > ids.len(), "should generate new tokens");
 
-    // Decoding happens locally on the client: the output text also never touches the network.
     let text = session.local_worker.decode(&out[ids.len()..], true).await.expect("decode");
     assert!(!text.is_empty(), "client decodes the answer locally");
     println!("\n=== privacy-max generation ===\nanswer: {}\n", text);

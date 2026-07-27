@@ -60,7 +60,6 @@ async fn unsigned_peer_is_rejected() {
     let reg_a = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
     let reg_b = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
 
-    // B's registry contains a forged peer: valid-looking but with no signature.
     let forged = Peer {
         node_id: vec![4, 2, 4, 2],
         daemon_endpoint: "http://malicious".to_string(),
@@ -102,9 +101,7 @@ async fn tampered_peer_is_rejected() {
     let reg_b = Arc::new(Mutex::new(PeerRegistry::new(60_000)));
 
     let key = new_key();
-    // A peer legitimately signed for slice 0:12...
     let mut tampered = signed_peer(&key, "http://victim", "http://w", "m", 0, 12);
-    // ...then an attacker alters the slice it claims to hold, without re-signing.
     tampered.end_layer = 24;
     {
         let mut b = reg_b.lock().await;

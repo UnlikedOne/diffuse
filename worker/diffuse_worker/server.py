@@ -183,8 +183,6 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 else None
             )
             if positions is not None or memory is not None:
-                # Multi-axis positions cannot be batched with other sessions,
-                # which carry their own; run this one on its own.
                 out = self.runner.run(
                     tensor_in,
                     is_input_ids=is_input_ids,
@@ -318,8 +316,6 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     samples, _rate = soundfile.read(io.BytesIO(item.data))
                     audio.append(samples)
                 elif item.kind == "video":
-                    # A processor wants decoded frames, not a container. The
-                    # bytes are written out because the decoders read files.
                     import tempfile
 
                     import imageio.v2 as iio
@@ -343,9 +339,6 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
 
                     images.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
 
-            # The chat template is what puts a placeholder in the prompt for every
-            # attachment. Sending the text alone would leave the processor with
-            # media it has nowhere to insert.
             parts = [{"type": item.kind or "image"} for item in request.media]
             if len(request.messages) > 0:
                 conversation = [
@@ -392,8 +385,6 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
     def BeginGeneration(self, request, context):
         """Open a generation on this machine and say what it will produce."""
         if self.slice.model is None:
-            # A plain decoder needs nothing special: say so plainly rather than
-            # failing, so the caller takes the ordinary path without a warning.
             return data_pb2.BeginGenerationResponse(
                 ok=True, streams=1, output_kind="text"
             )
@@ -683,8 +674,6 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             return data_pb2.SearchModelsResponse(
                 ok=True,
                 models=[
-                    # The descriptor may carry more than the wire cares about;
-                    # keep the fields the message actually declares.
                     data_pb2.ModelCard(
                         **{
                             k: v

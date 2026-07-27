@@ -40,7 +40,6 @@ async fn three_nodes_fully_discover_via_transitivity() {
     let key2 = new_key();
     let key3 = new_key();
 
-    // Ring topology: node1 knows node2, node2 knows node3, node3 knows node1.
     let reg1 = make_node(&key1, ep1, 60101, vec![(&key2, ep2)]).await;
     let reg2 = make_node(&key2, ep2, 60102, vec![(&key3, ep3)]).await;
     let reg3 = make_node(&key3, ep3, 60103, vec![(&key1, ep1)]).await;

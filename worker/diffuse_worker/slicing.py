@@ -9,10 +9,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 _LAYER_RE = re.compile(r"\.(?:layers|h|blocks|block)\.(\d+)\.")
 
-# A multimodal checkpoint carries an encoder tower (vision, audio) and a
-# projector alongside the language stack. The tower numbers its own blocks, so
-# it has to be recognised before the layer regex ever runs, or those blocks
-# would be mistaken for decoder layers and sliced apart.
 _TOWER_MARKERS = (
     "vision_model",
     "vision_tower",
@@ -26,24 +22,13 @@ _TOWER_MARKERS = (
     "modality_projection",
     "merger",
     "perceiver",
-    # An encoder-decoder carries its encoder the same way: a fixed cost that
-    # belongs with the endpoints, never a stack to split. Naming it here also
-    # keeps its blocks out of the layer count, since a T5 numbers them
-    # `.block.N.` and would otherwise be measured as decoder layers.
     "enc_to_dec_proj",
-    # Any encoder at all. An encoder-decoder can carry one exactly as deep as
-    # its decoder, and picking the wrong twelve layers would split the half
-    # that reads rather than the half that answers.
     "encoder",
 )
 
 _TEXT_MODULE_NAMES = ("language_model", "text_model", "model", "transformer")
 
 
-# Where a checkpoint keeps the stack Diffuse slices. Multimodal models put it
-# under `text_config`, MusicGen under `decoder`, others elsewhere; the names are
-# tried in order and then any sub-config that declares a depth, so a family
-# nobody has named here is still found by its shape.
 _DECODER_SECTIONS = (
     "text_config",
     "decoder_config",
@@ -105,8 +90,6 @@ def needs_endpoints(cfg) -> bool:
     is where the media is consumed and where the answer is rebuilt."""
     if is_multimodal(cfg):
         return True
-    # An encoder-decoder always needs its encoder run somewhere, and that
-    # somewhere is the machine that owns the prompt or the recording.
     if getattr(cfg, "is_encoder_decoder", False):
         return True
     decoder = text_config(cfg)
@@ -271,9 +254,6 @@ def _resolve_backbone(model):
         )
     layers_attr, layers = found
 
-    # The embedding that feeds the sliced stack is the one attached to the
-    # module owning it. On an encoder-decoder, get_input_embeddings returns the
-    # encoder's, which would embed the wrong vocabulary entirely.
     embed = getattr(backbone, "embed_tokens", None)
     if embed is None:
         embed = model.get_input_embeddings()
@@ -310,9 +290,6 @@ def _is_embedding_tensor(name: str) -> bool:
 
 
 def _tensor_is_needed(name, start_layer, end_layer, total, tied=False):
-    # The tower rides with the slice holding the embeddings, since that is where
-    # media becomes hidden states. Checked before the layer regex, which its own
-    # numbered blocks would otherwise match.
     if _is_tower_tensor(name):
         return start_layer == 0
     m = _LAYER_RE.search(name)
@@ -377,10 +354,6 @@ def _align_state_keys(model, state):
             candidates = suffixes.get(".".join(parts[i:]))
             if not candidates:
                 continue
-            # An encoder tower carries layers named exactly like the decoder's,
-            # down to `layers.0.self_attn.q_proj.weight`, so a suffix alone is
-            # ambiguous. Keeping only candidates on the same side of that line
-            # makes the match unique again.
             candidates = [c for c in candidates if _is_tower_tensor(c) == from_tower]
             if len(candidates) == 1:
                 aligned[candidates[0]] = tensor
@@ -395,7 +368,6 @@ def _detach_unused_modules(model, parts, start_layer, end_layer, total):
     if start_layer != 0:
         unused.append(parts.get("embed"))
         unused.append(parts.get("pos_embed"))
-        # A middle or tail slice never sees media, so the tower is dead weight.
         unused.extend((parts.get("tower") or {}).values())
     if end_layer != total:
         unused.append(parts.get("norm"))
@@ -418,13 +390,6 @@ def _rebuild_meta_buffers(model, cfg):
         if not stale:
             continue
         rebuilt = None
-        # On a multimodal checkpoint the rotary buffers belong to the language
-        # model, so they have to be rebuilt from the text sub-config; the root
-        # config describes the wrapper and does not carry the right fields.
-        # A buffer can belong to the language model or to an encoder tower, and
-        # each is described by its own sub-config. Rebuilding a vision rotary
-        # from the text config, or from the root one, silently fails and sends
-        # the loader back to downloading the whole checkpoint.
         candidates = [text_config(cfg)]
         for sub in ("vision_config", "audio_config", "video_config"):
             inner_cfg = getattr(cfg, sub, None)
@@ -449,9 +414,6 @@ def _rebuild_meta_buffers(model, cfg):
 
 
 def _build_kwargs(hf_token, cache_dir):
-    # No attention implementation is forced. Transformers already picks the
-    # fastest one a model supports, and pinning sdpa breaks the architectures
-    # that have no sdpa path, such as the T5 encoder MusicGen carries.
     return {"token": hf_token, "cache_dir": cache_dir}
 
 
@@ -493,9 +455,6 @@ class ModelSlice:
         if total is None:
             raise ValueError(f"cannot determine the layer count of {model_id}")
         self.multimodal = is_multimodal(cfg)
-        # A processor is needed by more than the multimodal ones: an
-        # encoder-decoder reads a spectrogram through its feature extractor, and
-        # falling back to the tokenizer asks it for text it will never get.
         self.wants_processor = needs_endpoints(cfg)
 
         if start_layer == 0 and end_layer == 0:
@@ -504,10 +463,6 @@ class ModelSlice:
             self.end_layer = 0
             self.total_layers = total
             self._load_frontend(model_id, hf_token, cache_dir)
-            # A text client needs nothing but the tokenizer. A multimodal one
-            # has to hold the embeddings and the encoder tower, because that is
-            # what turns a picture or a recording into activations, and doing it
-            # anywhere else would mean handing the raw media to a stranger.
             if needs_endpoints(cfg):
                 tied = bool(getattr(cfg, "tie_word_embeddings", False))
                 try:
@@ -519,10 +474,6 @@ class ModelSlice:
                     else:
                         raise RuntimeError("no partial plan available")
                 except Exception as exc:
-                    # Some towers hold buffers that cannot be rebuilt from a
-                    # config, so the slice-by-slice loader cannot materialise
-                    # them. Falling back costs the whole checkpoint but leaves
-                    # the client able to embed media, which is the point.
                     print(f"partial media frontend unavailable ({exc}), loading in full")
                     try:
                         self._load_full(model_id, 0, 0, total, hf_token, cache_dir)

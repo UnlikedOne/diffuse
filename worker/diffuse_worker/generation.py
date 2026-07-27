@@ -3,12 +3,6 @@ import threading
 
 import torch
 
-# The loop that turns streams of tokens back into an answer is the one part of
-# inference that stays model-specific: a music model interleaves its codebooks,
-# a text model does not. It lives here, on the machine that asked the question,
-# so the orchestrator only ever relays tensors and never learns what any
-# particular model expects.
-
 
 class GenerationSession:
     """Owns the generation state for one request, on the client's own machine."""
@@ -22,7 +16,6 @@ class GenerationSession:
         self.produced: list[int] = []
         self.finished = False
 
-    # -- what the model is shaped like, asked rather than assumed -------------
 
     def _decoder(self):
         model = self.slice.model
@@ -88,7 +81,6 @@ class GenerationSession:
                 return count
         return 1
 
-    # -- the loop ------------------------------------------------------------
 
     @torch.inference_mode()
     def begin(self, inputs) -> torch.Tensor:
@@ -107,8 +99,6 @@ class GenerationSession:
         decoder = self._decoder()
         if decoder is None:
             if self.memory is not None:
-                # An encoder-decoder that answers in words starts its decoder on
-                # the token its generation config names, not on the prompt.
                 config = getattr(model, "generation_config", None)
                 start = getattr(config, "decoder_start_token_id", None)
                 if start is not None:
@@ -150,7 +140,6 @@ class GenerationSession:
                 return None
             return torch.tensor([[token]], dtype=torch.long)
 
-        # Either a shortlist per stream, best first, or full scores to rank.
         if picked_ids:
             picked = streams[:, 0].reshape(-1, 1)
         else:

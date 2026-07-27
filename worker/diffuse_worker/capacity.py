@@ -79,11 +79,6 @@ def profile_model(model_id: str, load_dtype: str = "bfloat16", hf_token: str | N
     for file_meta in meta.files_metadata.values():
         for name, tensor in file_meta.tensors.items():
             size = tensor.parameter_count * per
-            # An encoder tower numbers its own blocks, so counting them as
-            # decoder layers overstates the model: Qwen2-VL would be profiled
-            # with 32 layers for a 28 layer decoder, and the assignment would
-            # hand out a slice that does not exist. The tower is a fixed cost
-            # carried by whoever holds the embeddings.
             m = None if _is_tower_tensor(name) else _LAYER_RE.search(name)
             if m:
                 idx = int(m.group(1))
@@ -118,7 +113,6 @@ def gpu_memory_bytes() -> tuple[int, str] | None:
             free, _total = torch.cuda.mem_get_info()
             return int(free), "cuda"
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            # Apple Silicon: unified memory, use system available as a proxy.
             return None
     except Exception:
         pass

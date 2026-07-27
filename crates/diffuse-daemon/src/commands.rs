@@ -17,9 +17,6 @@ use crate::registry::{now_ms, Peer};
 use diffuse_trust::crypto::sign;
 
 
-/// Explain why an incomplete model can't be served, naming the exact layer
-/// ranges the network is missing so the user knows what to spin up rather than
-/// letting a query build a route that dead-ends partway through the model.
 pub(crate) fn incomplete_model_message(cap: &ModelCapacity) -> String {
     let gaps = cap.coverage_gaps();
     if gaps.is_empty() {
@@ -679,7 +676,6 @@ pub(crate) async fn start_local_tokenizer(port: u16) -> anyhow::Result<(WorkerGu
     }
 }
 
-/// An attachment ready for the local worker: what it is, and its bytes.
 #[derive(Debug)]
 pub struct Attachment {
     pub kind: String,
@@ -844,8 +840,6 @@ pub async fn query(
         Err(e) => tracing::debug!("not a diffusion pipeline: {:#}", e),
     }
 
-    // Ask the local worker what this model answers with. A model that returns
-    // audio or pixels is driven differently from one that returns words.
     let media: Vec<(String, Vec<u8>, String)> = attachments
         .iter()
         .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
@@ -857,15 +851,11 @@ pub async fn query(
     let generative = match generative {
         Ok(started) => Some(started),
         Err(e) => {
-            // Never swallow this: a model that should have answered with audio
-            // silently falling back to the text path is worse than a failure.
             tracing::warn!("could not start a generative session: {:#}", e);
             None
         }
     };
     if let Some((Some(first), memory, streams, kind)) = generative {
-        // A model that answers in words but reads through an encoder still goes
-        // the generative way: what it needs is its memory carried, not its kind.
         if kind != "text" || memory.is_some() {
             run_generative(
                 &mut orch,
@@ -880,12 +870,9 @@ pub async fn query(
             .await?;
             return Ok(());
         }
-        // The probe opened a session this path will not drive; close it so the
-        // worker does not hold a prompt nobody is going to generate from.
         let _ = tokenizer_worker.finish_generation(&session_id).await;
     }
 
-    // Prompt and media are consumed here. What leaves is activations.
     let new_ids = if attachments.is_empty() {
         let (ids, eos) = tokenizer_worker.encode(prompt, true).await?;
         println!("  {} generating over encrypted channel...", "→".bright_blue());
@@ -1152,8 +1139,6 @@ pub async fn chat(
             .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
             .collect();
 
-        // Ask the model what it answers with before deciding how to drive it.
-        // Words stream token by token; audio or pixels are assembled and saved.
         match tokenizer_worker
             .begin_generation(&session, &msg, media.clone(), max_tokens as u32)
             .await
@@ -1185,8 +1170,6 @@ pub async fn chat(
                     pending.clear();
                     continue;
                 }
-                // The probe opened a session this path will not drive; close it
-                // so the worker does not hold a prompt nobody generates from.
                 _ => {
                     let _ = tokenizer_worker.finish_generation(&session).await;
                 }
@@ -1194,8 +1177,6 @@ pub async fn chat(
             Err(e) => tracing::warn!("could not start a generative session: {:#}", e),
         }
 
-        // Build the full conversation: past history + this new user message.
-        // With memory: send full history. Without (default): each message is standalone.
         let messages = if memory {
             let mut m = history.clone();
             m.push(("user".to_string(), msg.clone()));
@@ -1218,7 +1199,6 @@ pub async fn chat(
         crate::tui::phase_done("prompt sealed", "X25519 · ChaCha20");
         tokio::time::sleep(Duration::from_millis(140)).await;
 
-        // Media is read here, on this machine. What leaves is hidden states.
         let embedded = if pending.is_empty() {
             None
         } else {
@@ -1413,7 +1393,6 @@ fn start_answer() -> crate::tui::LiveMeter {
     crate::tui::LiveMeter::new()
 }
 
-/// Splits `/attach path`, `/image path`, `/audio path`, `/video path`.
 fn split_attach_command(msg: &str) -> Option<(&str, &str)> {
     for command in ["/attach", "/image", "/audio", "/video"] {
         if msg == command {
@@ -1570,7 +1549,6 @@ fn render_banner(version: &str, model: &str) {
     );
     line("", cyan, false);
     for (i, l) in logo.iter().enumerate() {
-        // Le titre central (ligne 3) en cyan vif, le reste de l'anneau en cyan doux
         if i == 3 {
             line(l, cyan, true);
         } else {

@@ -3,8 +3,6 @@ use diffuse_daemon::registry::{now_ms, Peer, PeerRegistry};
 
 fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
     Peer {
-        // Distinct id per peer — the registry keys on node_id, so a shared id
-        // would collapse these into a single entry.
         node_id: ep.as_bytes().to_vec(),
         daemon_endpoint: ep.to_string(),
         worker_endpoint: format!("{}-w", ep),
@@ -22,9 +20,7 @@ fn peer(model: &str, ep: &str, start: u32, end: u32) -> Peer {
 #[test]
 fn best_servable_is_the_largest_fully_covered() {
     let mut r = PeerRegistry::new(600_000);
-    // small: 0:12, fully servable (12 layers).
     r.upsert(peer("small", "http://s", 0, 12));
-    // big: 0:24 covered, but 24:48 has no holder -> gap -> NOT servable.
     r.upsert(peer("big", "http://a", 0, 24));
     r.upsert(peer("big", "http://b", 48, 60));
 
@@ -48,11 +44,8 @@ fn no_fallback_while_current_is_servable() {
 #[test]
 fn falls_back_when_current_becomes_unservable() {
     let mut r = PeerRegistry::new(600_000);
-    // "big" lost a slice: only 0:12 remains of a 0:24 model -> not servable.
     r.upsert(peer("big", "http://a", 0, 12));
-    // announce big also has a 12:24 slice-holder that is gone (we just omit it)
-    r.upsert(peer("big", "http://a2", 24, 36)); // creates a gap, big not servable
-    // "small" is fully servable as a fallback.
+    r.upsert(peer("big", "http://a2", 24, 36));
     r.upsert(peer("small", "http://s", 0, 12));
 
     let caps = analyze(&r);

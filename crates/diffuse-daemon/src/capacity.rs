@@ -32,11 +32,6 @@ impl ModelCapacity {
             .collect()
     }
 
-    /// The layer ranges of `[0, total_layers)` that no live slice covers.
-    /// Unlike `missing_slices` (which only reports announced-but-unheld slices),
-    /// this walks the whole model depth and reports every hole — including the
-    /// tail region no peer advertises at all, e.g. `12:64` when the network only
-    /// holds `0:12` of a 64-layer model. Empty when the model is fully servable.
     pub fn coverage_gaps(&self) -> Vec<(u32, u32)> {
         let mut gaps = Vec::new();
         if self.total_layers == 0 {
@@ -44,7 +39,6 @@ impl ModelCapacity {
         }
         let mut covered_up_to = 0u32;
         loop {
-            // Extend the covered prefix as far as any live slice reaches.
             let mut progressed = true;
             while progressed {
                 progressed = false;
@@ -59,8 +53,6 @@ impl ModelCapacity {
             if covered_up_to >= self.total_layers {
                 break;
             }
-            // There is a hole starting at `covered_up_to`. It runs until the next
-            // live slice begins, or to the end of the model if none do.
             let next_start = self
                 .slices
                 .iter()
@@ -86,12 +78,6 @@ pub fn analyze(registry: &PeerRegistry) -> Vec<ModelCapacity> {
     let mut result = Vec::new();
 
     for (model_id, model_peers) in by_model {
-        // Prefer the model's true depth as reported by the worker (propagated
-        // through gossip in `total_layers`). Fall back to inferring it from the
-        // highest advertised `end_layer` only when no peer reports a real total
-        // — i.e. every holder predates the field. Without this, a lone node
-        // serving layers 0:6 of a 64-layer model would look complete (7/7)
-        // instead of incomplete (7/64).
         let reported_total = model_peers
             .iter()
             .map(|p| p.total_layers)
@@ -270,7 +256,6 @@ pub fn assign_slice(
 
     let existing = caps.iter().find(|c| c.model_id == model_id);
 
-    // Case 1: model not present at all -> take from the start.
     let Some(cap) = existing else {
         let end = cap_layers.min(total_layers);
         return Some(SliceAssignment {
@@ -280,7 +265,6 @@ pub fn assign_slice(
         });
     };
 
-    // Case 2: there is a coverage gap -> fill it (as much as capacity allows).
     if let Some((gap_start, gap_end)) = first_coverage_gap_with_total(cap, total_layers) {
         let want = gap_end - gap_start;
         let take = want.min(cap_layers);
@@ -291,7 +275,6 @@ pub fn assign_slice(
         });
     }
 
-    // Case 3: fully covered -> reinforce the weakest slice if under target.
     if let Some(weak) = cap
         .slices
         .iter()
@@ -311,7 +294,6 @@ pub fn assign_slice(
         }
     }
 
-    // Case 4: everything robust -> add redundancy on the least-replicated slice.
     let least = cap.slices.iter().min_by_key(|s| s.replicas)?;
     let want = least.end_layer - least.start_layer;
     if want <= cap_layers {

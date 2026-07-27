@@ -1,10 +1,5 @@
 use std::collections::HashMap;
 
-/// Wire protocol this build speaks. Bumped when the format of what travels
-/// between nodes changes in a way older nodes cannot parse. A peer's version is
-/// never taken from gossip: a node that predates a field silently drops it when
-/// relaying, and the field would be unsigned and so forgeable. It is learned
-/// from the peer's own answer on the encrypted channel instead.
 pub const WIRE_VERSION: u32 = 1;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,10 +11,6 @@ pub struct Peer {
     pub model_id: String,
     pub start_layer: u32,
     pub end_layer: u32,
-    /// Total number of layers in the model, as reported by the worker that
-    /// hosts this slice. `0` means "unknown" — a peer running a version that
-    /// predates this field, in which case consumers fall back to inferring the
-    /// total from the highest advertised `end_layer`.
     pub total_layers: u32,
     pub last_seen_ms: u64,
     pub signature: Vec<u8>,
@@ -141,11 +132,6 @@ impl Peer {
         buf.extend_from_slice(&self.start_layer.to_le_bytes());
         buf.extend_from_slice(&self.end_layer.to_le_bytes());
         buf.extend_from_slice(&self.kx_public);
-        // `total_layers` was added after the original signing scheme. Only fold
-        // it into the signed bytes when it is present, so that a peer running an
-        // older version (which never sends the field, decoded here as 0) still
-        // produces bytes a newer verifier can reproduce and accept. Newer peers
-        // always set it, so their signatures cover it.
         if self.total_layers != 0 {
             buf.extend_from_slice(&self.total_layers.to_le_bytes());
         }
@@ -175,14 +161,10 @@ mod tests {
 
     #[test]
     fn signable_bytes_are_backward_compatible_when_total_is_unknown() {
-        // A peer that predates the total_layers field reports 0. Its signed
-        // bytes must be identical to the pre-field scheme so a newer verifier,
-        // recomputing them, still accepts the old signature.
         let mut legacy = peer(1, "http://a", "m", now_ms());
         legacy.total_layers = 0;
         let legacy_bytes = legacy.signable_bytes();
 
-        // Reconstruct the pre-field byte layout by hand.
         let mut expected = Vec::new();
         expected.extend_from_slice(&legacy.node_id);
         expected.push(0);
@@ -197,7 +179,6 @@ mod tests {
         expected.extend_from_slice(&legacy.kx_public);
         assert_eq!(legacy_bytes, expected, "unknown total must not alter the signed bytes");
 
-        // A peer that does report a total folds it into the signature.
         let mut modern = peer(1, "http://a", "m", now_ms());
         modern.total_layers = 64;
         assert_eq!(

@@ -360,8 +360,6 @@ fn build_listings(
         .map(|card| {
             let needed = card.params.saturating_mul(2);
             let fits_whole = card.params > 0 && (needed as f64) * 1.3 <= available_bytes as f64;
-            // A rough per-layer cost is enough to sort the runnable from the
-            // hopeless; the exact figure comes from profiling on selection.
             let per_layer = if card.layers > 0 && card.params > 0 {
                 needed / card.layers as u64
             } else {
@@ -385,10 +383,6 @@ fn build_listings(
         .collect()
 }
 
-/// Browse Hugging Face live and pick a model to host.
-///
-/// Nothing here is a stored catalogue: every row was fetched a moment ago, and
-/// each model's own config decides whether Diffuse can split it.
 pub async fn browse(
     worker: &mut WorkerHandle,
     caps: &[ModelCapacity],
@@ -643,12 +637,9 @@ mod tests {
         assert!(screen.contains("DIFFUSE"), "the banner must be there");
         assert!(screen.contains("unlikedone"), "a signed in account is named");
         assert!(screen.contains("live from hugging face"), "the list says where it came from");
-        // A model that fits whole, one that only fits in slices, and one that
-        // does not fit at all must be told apart at a glance.
         assert!(screen.contains("whole model"));
         assert!(screen.contains("as a slice"));
         assert!(screen.contains("cannot run"));
-        // Modalities come from the model, not from a list in the code.
         assert!(screen.contains("image+video"), "video capability must show");
         assert!(screen.contains("audio"));
     }

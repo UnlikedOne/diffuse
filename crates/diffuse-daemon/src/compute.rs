@@ -507,8 +507,6 @@ pub async fn process_chained_request(
                 top_k: next.top_k,
                 route: req.route[1..].to_vec(),
                 accepts_bf16: req.route.get(1).map(|h| h.accepts_bf16).unwrap_or(false),
-                // Every stage indexes the same prompt, so the positions travel
-                // the whole chain rather than being recomputed per hop.
                 encrypted_position_ids: match &positions {
                     Some(p) => encrypt(&next_secret, &tensor_to_bytes(p))?,
                     None => Vec::new(),

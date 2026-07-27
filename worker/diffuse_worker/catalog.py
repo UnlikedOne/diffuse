@@ -3,9 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from huggingface_hub import HfApi, hf_hub_download
 
-# What a model can do is read off its own config. Nothing here is a list of
-# models or of families: a checkpoint published tomorrow is judged by the same
-# rules as one published last year.
 
 _GENERATIVE_SUFFIXES = (
     "ForCausalLM",
@@ -21,14 +18,9 @@ _MEDIA_SECTIONS = {
     "video_config": "video",
 }
 
-# A recurrent stack carries its own state instead of a key/value cache, so a
-# slice cannot hand its neighbour a cache the way a transformer does.
 _RECURRENT_KEYS = ("state_size", "conv_kernel", "time_step_rank", "time_mix_extra_dim")
 
 
-# Where a checkpoint keeps the stack Diffuse slices. The names are tried in
-# order and then any sub-config that declares a depth, so a family nobody has
-# named here is still found by its shape.
 _DECODER_SECTIONS = (
     "text_config",
     "decoder_config",
@@ -79,13 +71,7 @@ def describe(config: dict) -> dict:
     layers = _layer_count(config)
     inner = _text_section(config)
 
-    # Two independent tells, because a model may reuse one tower for several
-    # modalities: a sub-config for the encoder, and a placeholder token id for
-    # what the processor is willing to splice in. Qwen2-VL declares no video
-    # section but does declare a video token, and it does take video.
     inputs = ["text"]
-    # An encoder-decoder says what it reads through its feature extractor
-    # rather than through a sub-config: a mel spectrogram means audio in.
     if config.get("num_mel_bins") or config.get("input_feat_per_channel"):
         inputs = ["audio"]
     for section, modality in _MEDIA_SECTIONS.items():
@@ -156,7 +142,6 @@ def search(
         expand=["config", "safetensors", "downloads", "likes", "gated"],
     )
 
-    # A quantised or converted repack carries no config Diffuse can slice.
     skip = ("-gguf", "-awq", "-gptq", "-mlx", "-onnx", "embedding", "reranker")
     entries = []
     for model in listed:
@@ -183,7 +168,6 @@ def search(
     cards = []
     for entry, config in zip(entries, configs):
         if config is None:
-            # Gated without a token, or private: say so rather than hide it.
             entry.update(
                 architecture="",
                 model_type="",

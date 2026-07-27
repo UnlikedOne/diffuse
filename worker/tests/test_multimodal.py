@@ -87,8 +87,6 @@ def test_capability_is_read_off_the_config_not_a_list():
     assert vision["inputs"] == ["text", "image"]
     assert vision["layers"] == 30
 
-    # A model may reuse one tower for several modalities and say so only with a
-    # placeholder token id.
     both = describe(
         {
             "architectures": ["Qwen2VLForConditionalGeneration"],
@@ -99,8 +97,6 @@ def test_capability_is_read_off_the_config_not_a_list():
     )
     assert both["inputs"] == ["text", "image", "video"]
 
-    # An encoder-decoder is served now: its encoder runs on the asking machine
-    # and only its output travels, which is the same bargain media already made.
     encoder_decoder = describe(
         {
             "architectures": ["WhisperForConditionalGeneration"],
@@ -124,7 +120,6 @@ def test_capability_is_read_off_the_config_not_a_list():
     )
     assert not_generative["support"] == "unsupported"
 
-    # An architecture nobody has seen before is judged on its shape alone.
     unseen = describe(
         {"architectures": ["BrandNewForCausalLM"], "num_hidden_layers": 42}
     )
@@ -156,7 +151,6 @@ def test_checkpoint_keys_are_aligned_onto_the_model_names():
             "model.language_model.embed_tokens.weight",
         ]
     )
-    # How Voxtral actually spells them, which is not how the class does.
     state = {
         "audio_tower.conv1.weight": 1,
         "audio_tower.layers.0.self_attn.q_proj.weight": 2,
@@ -166,8 +160,6 @@ def test_checkpoint_keys_are_aligned_onto_the_model_names():
     aligned = _align_state_keys(model, state)
 
     assert aligned["model.audio_tower.conv1.weight"] == 1
-    # The tower names its blocks exactly like the decoder does; a tower tensor
-    # must not land on a decoder layer, nor the other way round.
     assert aligned["model.audio_tower.layers.0.self_attn.q_proj.weight"] == 2
     assert aligned["model.language_model.layers.0.self_attn.q_proj.weight"] == 3
     assert aligned["model.language_model.embed_tokens.weight"] == 4
@@ -185,12 +177,8 @@ def test_the_sliceable_stack_is_found_wherever_a_checkpoint_keeps_it():
     """No checkpoint is named here; each is found by the shape of its config."""
     from diffuse_worker.catalog import _layer_count
 
-    # A plain decoder declares its depth at the root.
     assert _layer_count({"num_hidden_layers": 24}) == 24
-    # A multimodal wrapper hides it under the text sub-config.
     assert _layer_count({"text_config": {"num_hidden_layers": 30}}) == 30
-    # An encoder-decoder keeps two stacks side by side; the decoder is the one
-    # Diffuse would split, and the encoder must not be mistaken for it.
     assert (
         _layer_count(
             {
@@ -201,7 +189,6 @@ def test_the_sliceable_stack_is_found_wherever_a_checkpoint_keeps_it():
         )
         == 24
     )
-    # A family nobody thought of is still found by its shape.
     assert _layer_count({"brand_new_config": {"num_hidden_layers": 42}}) == 42
     assert _layer_count({"nothing": {"unrelated": 3}}) is None
 
@@ -276,8 +263,6 @@ def test_a_client_holds_endpoints_only_when_the_model_needs_them():
     plain.num_hidden_layers = 24
     assert not needs_endpoints(plain)
 
-    # An encoder-decoder always needs its encoder run on the asking machine,
-    # and says so with a flag rather than with a sub-config.
     seq2seq = PretrainedConfig()
     seq2seq.num_hidden_layers = 12
     seq2seq.is_encoder_decoder = True

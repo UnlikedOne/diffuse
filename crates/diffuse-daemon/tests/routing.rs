@@ -114,9 +114,6 @@ async fn orchestrator_builds_from_discovered_registry() {
         .await
         .expect("load stage b");
 
-    // Each peer announces its daemon endpoint; the route derives the compute
-    // endpoint from it by adding 1000 to the port, so that is where the
-    // encrypted compute servers have to listen.
     let kx_a = Arc::new(KeyExchange::generate());
     let kx_b = Arc::new(KeyExchange::generate());
     let pub_a = kx_a.public_bytes();
@@ -145,8 +142,6 @@ async fn orchestrator_builds_from_discovered_registry() {
 
     assert_eq!(orch.stages.len(), 2, "should have discovered two slices");
 
-    // The route is made of remote replicas, so tokenizing goes through a direct
-    // worker connection rather than the orchestrator.
     let mut tokenizer = WorkerHandle::connect(w_a.endpoint()).await.expect("tokenizer");
     let (ids, _eos) = tokenizer.encode("Say hi.", true).await.expect("encode");
 

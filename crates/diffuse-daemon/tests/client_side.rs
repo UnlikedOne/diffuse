@@ -61,27 +61,21 @@ async fn wait_up(endpoint: &str) -> WorkerHandle {
 
 #[tokio::test]
 async fn prompt_never_leaves_client_only_activations_do() {
-    // Client-side worker holds the FIRST slice (embedding + first layers).
     let _client_worker = WorkerProc::spawn(50211);
-    // Remote host worker holds the REST of the model.
     let _host_worker = WorkerProc::spawn(50212);
 
     let mut client_w = wait_up("http://127.0.0.1:50211").await;
     let mut host_w = wait_up("http://127.0.0.1:50212").await;
 
     let full = client_w.load_slice(MODEL, 0, 2, "").await.expect("probe");
-    // Client keeps only layers 0:2 (embedding + 2 blocks), locally.
     client_w.load_slice(MODEL, 0, 2, "").await.expect("client slice");
-    // Host holds 2:full.
     host_w.load_slice(MODEL, 2, full, "").await.expect("host slice");
 
-    // The prompt is encoded and embedded LOCALLY on the client.
     let (ids, _eos) = client_w
         .encode("Tell me a secret.", true)
         .await
         .expect("encode locally");
 
-    // Build the input_ids tensor and run the first slice locally.
     let mut data = Vec::new();
     for id in &ids {
         data.extend_from_slice(&id.to_le_bytes());
@@ -92,14 +86,11 @@ async fn prompt_never_leaves_client_only_activations_do() {
         data,
     };
 
-    // Client executes slice 0:2 locally -> activations. Tokens stay here.
     let local_activations = client_w
         .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false, None, None, None)
         .await
         .expect("local first-slice execution");
 
-    // A requester that did not opt into the current wire format must still be
-    // answered in float32, the format every released version can parse.
     assert_eq!(
         local_activations.dtype, "float32",
         "a requester that does not announce bf16 support must get float32 back"
@@ -110,7 +101,6 @@ async fn prompt_never_leaves_client_only_activations_do() {
         "activations are hidden states [1, seq, hidden]"
     );
 
-    // Host daemon exposes an encrypted compute channel over its local worker.
     let host_kx = Arc::new(KeyExchange::generate());
     let host_kx_public = host_kx.public_bytes();
     let host_worker = Arc::new(Mutex::new(host_w));
@@ -118,7 +108,6 @@ async fn prompt_never_leaves_client_only_activations_do() {
     let _server = spawn_compute_server(addr, Arc::clone(&host_kx), host_worker, MODEL.to_string());
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Client sends the ACTIVATIONS (encrypted) to the host for the rest of the model.
     let client_kx = KeyExchange::generate();
     let mut compute_client = diffuse_daemon::compute::connect_compute("http://127.0.0.1:50312")
         .await
@@ -141,8 +130,6 @@ async fn prompt_never_leaves_client_only_activations_do() {
     .await
     .expect("remote completion over encrypted channel");
 
-    // The host returned logits over the full vocabulary: generation is possible
-    // even though the host never saw the prompt tokens.
     assert_eq!(logits.shape.len(), 3, "final logits [1, seq, vocab]");
     assert!(logits.shape[2] > 100_000, "vocab dimension for Qwen");
 }
