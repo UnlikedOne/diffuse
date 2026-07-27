@@ -60,6 +60,8 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: 'Slices and the pipeline', link: '/concepts/pipeline' },
+          { text: 'What Diffuse can run', link: '/concepts/model-support' },
+          { text: 'How the network is made fast', link: '/concepts/performance' },
           { text: 'Gossip and discovery', link: '/concepts/gossip' },
           { text: 'Replication and healing', link: '/concepts/replication' },
           { text: 'NAT relay', link: '/concepts/nat-relay' },
@@ -72,6 +74,8 @@ export default defineConfig({
         items: [
           { text: 'Chat with the network', link: '/guides/chat' },
           { text: 'Ask one question', link: '/guides/query' },
+          { text: 'Images, audio and video', link: '/guides/multimodal' },
+          { text: 'The marketplace', link: '/guides/marketplace' },
           { text: 'Host a node', link: '/guides/host' },
           { text: 'OpenAI-compatible server', link: '/guides/server' },
           { text: 'Choosing a model', link: '/guides/choosing-a-model' },
