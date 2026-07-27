@@ -19,7 +19,7 @@ Diffuse sends the top candidates instead.
 |---|---|---|
 | Qwen2.5-0.5B | 608 KB | **130 B** |
 | Mistral-Small-24B, 8 nodes | 652 KB total | **70 KB total** |
-| MusicGen-small, 4 audio streams | 32.8 KB | **411 B** |
+| MusicGen-small, 4 audio streams | 32.8 KB | **74 B** |
 
 At 100 Mbit/s that is roughly 45 ms per token given back on the small model,
 and it costs nothing: ties are broken the same way `argmax` breaks them, so the
@@ -29,11 +29,11 @@ The same logic applies to the prefill. Feeding a 500-token prompt used to ship
 262 MB of scores that nobody read, because the model only needs the last row.
 Now it ships the last row.
 
-A model that answers on several streams at once gets one shortlist per stream.
-MusicGen writes four audio codebooks per step; it now sends four lists of eight
-candidates instead of four vocabularies of 2,048. The generated audio is
-byte-for-byte what it was, for the same reason: the client only ever kept the
-best candidate of each stream.
+A model that answers on several streams at once gets one shortlist per stream
+when it decodes greedily. MusicGen writes four audio codebooks per step and
+samples rather than taking the best, so it gets something shorter still: the
+draw happens on the last slice, where the whole distribution is, and four token
+ids come back. Seventy-four bytes in place of thirty-two kilobytes.
 
 ## Activations at half the width
 
