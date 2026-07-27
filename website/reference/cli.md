@@ -16,6 +16,11 @@ Interactive chat with a model on the network.
 |------|---------|---------|
 | `--bootstrap <urls>` | built-in sentinels | sentinels to discover the network |
 | `--memory` | off | keep conversation history across turns |
+| `--max-tokens <n>` | 512 | longest answer per turn |
+
+Inside a session, `/attach`, `/image`, `/audio` and `/video` send a file with
+the next message, and a model that answers with audio or pixels writes its
+answer to a file. The full command list is in the [chat guide](/guides/chat).
 
 ## `query`
 

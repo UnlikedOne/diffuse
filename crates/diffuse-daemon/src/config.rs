@@ -101,6 +101,11 @@ pub enum Command {
         bootstrap: Vec<String>,
         #[arg(long, default_value_t = false)]
         memory: bool,
+        /// Longest answer per turn. For a model that answers with words this is
+        /// a ceiling reached only if it never stops; for one that answers with
+        /// audio or pixels it is the length of the answer itself.
+        #[arg(long, default_value_t = 512)]
+        max_tokens: usize,
     },
     /// Run a local OpenAI-compatible HTTP server in front of the network
     Serve {

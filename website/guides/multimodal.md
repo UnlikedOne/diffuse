@@ -51,6 +51,22 @@ diffuse query --model Qwen/Qwen2-VL-2B-Instruct \
   --image left.png --image right.png
 ```
 
+## The same thing, in a conversation
+
+`diffuse chat` takes attachments too, as commands rather than flags. Attach
+first, then ask; the files apply to the next message only.
+
+```
+● › /image left.png
+● › /image right.png
+● › Which of these two pictures is brighter?
+```
+
+`/attach` is the universal one, `/files` shows what is queued, `/detach` drops
+it. A model that answers with audio or an image writes its answer to a file and
+prints the path, exactly as `query` does. The [chat guide](/guides/chat) has the
+complete list.
+
 ## Where your picture actually goes
 
 Nowhere. That is the whole point, and it is worth being precise about.
@@ -157,6 +173,14 @@ Install it with `--no-deps` if pip wants to replace your torch. A mismatched
 Your client did not load the model's front end. This happens when the local
 worker is an older build than the binary; see
 [troubleshooting](/troubleshooting#the-installed-worker-is-not-the-one-you-edited).
+
+**A multimodal model gives the same answer whatever you ask it in text.** Your
+worker predates the fix for this. A multimodal checkpoint lays out a
+conversation as a list of parts; handed a plain string, its tokenizer's template
+does not fail, it writes an empty turn — so the model answers a question it
+never received. Update the worker, and read
+[troubleshooting](/troubleshooting#the-installed-worker-is-not-the-one-you-edited)
+if you are not sure which copy is running.
 
 **The answer ignores the picture.** Check that the model actually takes images.
 `diffuse models` and the marketplace both show what a model reads. A text model

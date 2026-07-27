@@ -47,7 +47,11 @@ async fn main() -> anyhow::Result<()> {
             commands::query(&model, &prompt, attachments, &bootstrap, max_tokens, identity).await
         }
         Command::Models { bootstrap } => commands::models(&bootstrap, identity).await,
-        Command::Chat { bootstrap, memory } => commands::chat(&bootstrap, memory, identity).await,
+        Command::Chat {
+            bootstrap,
+            memory,
+            max_tokens,
+        } => commands::chat(&bootstrap, memory, max_tokens, identity).await,
         Command::Serve {
             port,
             host,

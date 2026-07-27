@@ -61,7 +61,7 @@ async fn run_generative(
     streams: u32,
     kind: &str,
     attachments: &[Attachment],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     for item in attachments {
         println!(
             "  {} {} {} stays on this machine, only activations leave",
@@ -107,7 +107,7 @@ async fn run_generative(
         println!("  {}", "answer:".bright_green().bold());
         println!("  {}", text);
         println!();
-        return Ok(());
+        return Ok(text);
     }
 
     let extension = mime.rsplit('/').next().unwrap_or("bin");
@@ -124,7 +124,12 @@ async fn run_generative(
     );
     println!("  {}", path.display().to_string().bright_green().bold());
     println!();
-    Ok(())
+    Ok(format!(
+        "{} of {} written to {}",
+        human_bytes(data.len() as u64),
+        mime,
+        path.display()
+    ))
 }
 
 pub async fn plan(
@@ -722,7 +727,7 @@ pub async fn query(
         // A model that answers in words but reads through an encoder still goes
         // the generative way: what it needs is its memory carried, not its kind.
         if kind != "text" || memory.is_some() {
-            return run_generative(
+            run_generative(
                 &mut orch,
                 &mut tokenizer_worker,
                 &session_id,
@@ -732,8 +737,12 @@ pub async fn query(
                 &kind,
                 &attachments,
             )
-            .await;
+            .await?;
+            return Ok(());
         }
+        // The probe opened a session this path will not drive; close it so the
+        // worker does not hold a prompt nobody is going to generate from.
+        let _ = tokenizer_worker.finish_generation(&session_id).await;
     }
 
     // Prompt and media are consumed here. What leaves is activations.
@@ -835,7 +844,12 @@ pub async fn models(bootstrap_sentinels: &[String], identity: Identity) -> anyho
     Ok(())
 }
 
-pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identity) -> anyhow::Result<()> {
+pub async fn chat(
+    bootstrap_sentinels: &[String],
+    memory: bool,
+    max_tokens: usize,
+    identity: Identity,
+) -> anyhow::Result<()> {
     use std::io::Write;
 
     print!("\x1b[2J\x1b[H");
@@ -909,6 +923,7 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
 
     let mut history: Vec<(String, String)> = Vec::new();
     let mut transcript: Vec<(String, String)> = Vec::new();
+    let mut pending: Vec<Attachment> = Vec::new();
     let mut total_tokens: usize = 0;
     let session_prefix = format!("{:016x}", now_ms());
     let mut turn = 0u64;
@@ -937,7 +952,33 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         }
         if msg == "/reset" {
             history.clear();
+            pending.clear();
             crate::tui::note("conversation memory cleared.");
+            continue;
+        }
+        if let Some((command, rest)) = split_attach_command(&msg) {
+            match rest {
+                "" => crate::tui::error(&format!("{} needs a file path", command)),
+                path => match read_attachment(path, forced_kind(command)) {
+                    Ok(item) => {
+                        crate::tui::ok(
+                            &format!("attached {}", item.kind),
+                            &format!("{} · {}", item.label, human_bytes(item.data.len() as u64)),
+                        );
+                        pending.push(item);
+                    }
+                    Err(e) => crate::tui::error(&format!("{}", e)),
+                },
+            }
+            continue;
+        }
+        if msg == "/files" {
+            print_pending(&pending);
+            continue;
+        }
+        if msg == "/detach" {
+            pending.clear();
+            crate::tui::note("attachments cleared.");
             continue;
         }
         if msg == "/clear" {
@@ -966,6 +1007,53 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         turn += 1;
         let session = format!("{}-{}", session_prefix, turn);
 
+        let media: Vec<(String, Vec<u8>, String)> = pending
+            .iter()
+            .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
+            .collect();
+
+        // Ask the model what it answers with before deciding how to drive it.
+        // Words stream token by token; audio or pixels are assembled and saved.
+        match tokenizer_worker
+            .begin_generation(&session, &msg, media.clone(), max_tokens as u32)
+            .await
+        {
+            Ok((first, encoder_memory, streams, kind)) => match first {
+                Some(first) if kind != "text" || encoder_memory.is_some() => {
+                    println!();
+                    match run_generative(
+                        &mut orch,
+                        &mut tokenizer_worker,
+                        &session,
+                        first,
+                        encoder_memory,
+                        streams,
+                        &kind,
+                        &pending,
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            transcript.push((msg.clone(), summary.clone()));
+                            if memory {
+                                history.push(("user".to_string(), msg.clone()));
+                                history.push(("assistant".to_string(), summary));
+                            }
+                        }
+                        Err(e) => crate::tui::error(&format!("generation failed: {}", e)),
+                    }
+                    pending.clear();
+                    continue;
+                }
+                // The probe opened a session this path will not drive; close it
+                // so the worker does not hold a prompt nobody generates from.
+                _ => {
+                    let _ = tokenizer_worker.finish_generation(&session).await;
+                }
+            },
+            Err(e) => tracing::warn!("could not start a generative session: {:#}", e),
+        }
+
         // Build the full conversation: past history + this new user message.
         // With memory: send full history. Without (default): each message is standalone.
         let messages = if memory {
@@ -990,6 +1078,33 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         crate::tui::phase_done("prompt sealed", "X25519 · ChaCha20");
         tokio::time::sleep(Duration::from_millis(140)).await;
 
+        // Media is read here, on this machine. What leaves is hidden states.
+        let embedded = if pending.is_empty() {
+            None
+        } else {
+            for item in &pending {
+                crate::tui::phase_done(
+                    &format!("{} read locally", item.kind),
+                    &format!("{} · only activations leave", item.label),
+                );
+            }
+            match tokenizer_worker.embed_media(&msg, media, true, true).await {
+                Ok((prefill, count, positions)) => {
+                    crate::tui::phase_done(
+                        "embedded",
+                        &format!("{} hidden states", count),
+                    );
+                    Some((prefill, positions))
+                }
+                Err(e) => {
+                    crate::tui::error(&format!("could not read the attachments: {}", e));
+                    pending.clear();
+                    continue;
+                }
+            }
+        };
+        let prompt_len = if embedded.is_some() { 0 } else { ids.len() };
+
         let hops = orch.stages.len();
         let route = crate::tui::phase_spinner("routing through the network");
         tokio::time::sleep(Duration::from_millis(240)).await;
@@ -1007,15 +1122,24 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
 
         let mut interrupted = false;
         let out: anyhow::Result<Vec<i64>> = {
-            let gen_fut = orch.generate_streaming(
-                &ids,
-                4096,
-                &session,
-                Some(eos),
-                move |tid| {
-                    let _ = tok_tx.send(tid);
-                },
-            );
+            let emit = move |tid: i64| {
+                let _ = tok_tx.send(tid);
+            };
+            type Streamed<'a> =
+                std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<i64>>> + 'a>>;
+            let gen_fut: Streamed<'_> = match embedded {
+                Some((prefill, positions)) => Box::pin(orch.generate_from_embeddings(
+                    prefill,
+                    positions,
+                    max_tokens,
+                    &session,
+                    Some(eos),
+                    emit,
+                )),
+                None => {
+                    Box::pin(orch.generate_streaming(&ids, max_tokens, &session, Some(eos), emit))
+                }
+            };
 
             let mut printed = String::new();
             let mut collected: Vec<i64> = Vec::new();
@@ -1100,9 +1224,9 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
             }
         };
 
-        let answer = if out.len() > ids.len() {
+        let answer = if out.len() > prompt_len {
             tokenizer_worker
-                .decode(&out[ids.len()..], true)
+                .decode(&out[prompt_len..], true)
                 .await
                 .unwrap_or_default()
         } else {
@@ -1110,7 +1234,7 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         };
         println!();
 
-        let new_tokens = out.len().saturating_sub(ids.len());
+        let new_tokens = out.len().saturating_sub(prompt_len);
         total_tokens += new_tokens;
         let secs = gen_start.elapsed().as_secs_f64().max(0.001);
         let tok_s = new_tokens as f64 / secs;
@@ -1124,6 +1248,7 @@ pub async fn chat(bootstrap_sentinels: &[String], memory: bool, identity: Identi
         crate::tui::hud(hops, tok_s, compute_pct);
         transcript.push((msg.clone(), answer.trim().to_string()));
         println!();
+        pending.clear();
 
         if memory {
             history.push(("user".to_string(), msg));
@@ -1148,11 +1273,58 @@ fn start_answer() -> crate::tui::LiveMeter {
     crate::tui::LiveMeter::new()
 }
 
+/// Splits `/attach path`, `/image path`, `/audio path`, `/video path`.
+fn split_attach_command(msg: &str) -> Option<(&str, &str)> {
+    for command in ["/attach", "/image", "/audio", "/video"] {
+        if msg == command {
+            return Some((command, ""));
+        }
+        if let Some(rest) = msg.strip_prefix(command) {
+            if rest.starts_with(char::is_whitespace) {
+                return Some((command, rest.trim()));
+            }
+        }
+    }
+    None
+}
+
+fn forced_kind(command: &str) -> Option<&'static str> {
+    match command {
+        "/image" => Some("image"),
+        "/audio" => Some("audio"),
+        "/video" => Some("video"),
+        _ => None,
+    }
+}
+
+fn print_pending(pending: &[Attachment]) {
+    println!();
+    if pending.is_empty() {
+        crate::tui::note("nothing attached; /attach <file> adds one.");
+        println!();
+        return;
+    }
+    crate::tui::section(crate::tui::sym("📎", "@"), "attached to the next message");
+    for item in pending {
+        crate::tui::ok(
+            &item.kind,
+            &format!("{} · {}", item.label, human_bytes(item.data.len() as u64)),
+        );
+    }
+    println!();
+}
+
 fn print_chat_help() {
     println!();
     crate::tui::section(crate::tui::sym("⌘", "/"), "commands");
     let items = [
         ("/help", "show this list"),
+        ("/attach <file>", "attach a file, kind guessed from its extension"),
+        ("/image <file>", "attach a picture"),
+        ("/audio <file>", "attach a sound"),
+        ("/video <file>", "attach a clip"),
+        ("/files", "list what is attached to the next message"),
+        ("/detach", "drop the attachments"),
         ("/reset", "clear conversation memory"),
         ("/clear", "clear the screen"),
         ("/stats", "session stats"),
