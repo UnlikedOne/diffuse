@@ -54,3 +54,49 @@ def test_load_and_run_over_grpc(worker_channel):
     assert out.shape[0] == 1
     assert out.shape[1] == 3
     assert torch.isfinite(out).all()
+
+class _PartsOnlyTemplate:
+    """Templates the way a multimodal checkpoint does: only parts are read.
+
+    Handed a plain string it does not fail, it writes an empty turn, which is
+    exactly how SmolVLM's tokenizer silently dropped the user's question."""
+
+    def apply_chat_template(
+        self, conversation, tokenize=False, add_generation_prompt=False
+    ):
+        rendered = []
+        for message in conversation:
+            content = message["content"]
+            parts = content if isinstance(content, list) else []
+            said = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+            rendered.append(f"{message['role']}: {said}")
+        return "\n".join(rendered)
+
+
+class _PlainTokenizer:
+    def apply_chat_template(
+        self, conversation, tokenize=False, add_generation_prompt=False
+    ):
+        return "\n".join(f"{m['role']}: {m['content']}" for m in conversation)
+
+
+def test_prompt_survives_a_multimodal_chat_template():
+    # Both halves of the checkpoint template parts; only the processor is asked
+    # with parts, so asking the tokenizer with a string loses the question.
+    servicer = InferenceWorkerServicer(WorkerConfig())
+    servicer.slice.processor = _PartsOnlyTemplate()
+    servicer.slice.tokenizer = _PartsOnlyTemplate()
+
+    text = servicer._apply_template([{"role": "user", "content": "Name three colours."}])
+
+    assert "Name three colours." in text
+
+
+def test_a_text_only_checkpoint_still_uses_its_tokenizer():
+    servicer = InferenceWorkerServicer(WorkerConfig())
+    servicer.slice.processor = None
+    servicer.slice.tokenizer = _PlainTokenizer()
+
+    text = servicer._apply_template([{"role": "user", "content": "Name three colours."}])
+
+    assert text == "user: Name three colours."

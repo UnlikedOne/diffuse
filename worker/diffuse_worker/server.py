@@ -191,15 +191,10 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             templated = False
             if len(request.messages) > 0:
                 messages = [{"role": m.role, "content": m.content} for m in request.messages]
-                text = self.slice.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
+                text = self._apply_template(messages)
                 templated = True
             elif request.apply_chat_template:
-                messages = [{"role": "user", "content": request.text}]
-                text = self.slice.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
+                text = self._apply_template([{"role": "user", "content": request.text}])
                 templated = True
             else:
                 text = request.text
@@ -211,6 +206,28 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         except Exception as exc:
             log.exception("encode failed")
             return data_pb2.EncodeResponse(ok=False, error=str(exc))
+
+    def _apply_template(self, messages) -> str:
+        """Lay out a conversation the way this particular checkpoint expects.
+
+        A multimodal checkpoint templates content as a list of parts. Handing
+        its tokenizer a plain string does not fail: the template simply finds no
+        part it recognises and writes an empty turn, so the model answers a
+        question it was never asked. The processor's template understands parts,
+        so it is the one asked whenever the checkpoint ships one."""
+        processor = self.slice.processor
+        if processor is not None and hasattr(processor, "apply_chat_template"):
+            parts = [
+                {"role": m["role"], "content": [{"type": "text", "text": m["content"]}]}
+                for m in messages
+            ]
+            try:
+                return processor.apply_chat_template(parts, add_generation_prompt=True)
+            except Exception:
+                log.warning("processor template failed; falling back to the tokenizer")
+        return self.slice.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
     def Decode(self, request, context):
         if self.slice.tokenizer is None:
@@ -404,10 +421,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             kwargs["sampling_rate"] = rate
         if images:
             kwargs["images"] = images
+        text = self._prompt_with_placeholders(processor, request)
         if request.text or not kwargs.get("audio") is not None and not images:
-            kwargs["text"] = [request.text]
+            kwargs["text"] = [text]
         if "text" not in kwargs and not audio and not images:
-            kwargs["text"] = [request.text]
+            kwargs["text"] = [text]
 
         try:
             return processor(**kwargs)
@@ -415,6 +433,28 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             if audio:
                 return processor(audio[0], sampling_rate=rate, return_tensors="pt")
             return processor(request.text, return_tensors="pt")
+
+    def _prompt_with_placeholders(self, processor, request) -> str:
+        """The prompt with one placeholder per attachment, when the model uses them.
+
+        A vision processor refuses a picture it has nowhere to put: the count of
+        <image> markers in the text has to match the count of images. The chat
+        template is what writes those markers, so it is applied here whenever
+        media travels. Processors that do not template (Whisper, MusicGen) fall
+        back to the plain text, which is what they expect."""
+        if not request.media:
+            return request.text
+        template = getattr(processor, "apply_chat_template", None)
+        if template is None:
+            return request.text
+        content = [{"type": item.kind or "image"} for item in request.media]
+        content.append({"type": "text", "text": request.text})
+        try:
+            return template(
+                [{"role": "user", "content": content}], add_generation_prompt=True
+            )
+        except Exception:
+            return request.text
 
     def AdvanceGeneration(self, request, context):
         session = self.sessions.get(request.session_id)
