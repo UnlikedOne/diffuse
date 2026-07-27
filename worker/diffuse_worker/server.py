@@ -19,6 +19,7 @@ MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 
 
 TOPK_DTYPE = "topk_i64_f32"
+MULTI_TOPK_DTYPE = "topk_multi_i64_f32"
 
 
 def tensor_to_proto(t: torch.Tensor, accepts_bf16: bool = False) -> data_pb2.Tensor:
@@ -47,6 +48,31 @@ def topk_to_proto(indices: torch.Tensor, values: torch.Tensor) -> data_pb2.Tenso
         dtype=TOPK_DTYPE,
         data=ids.tobytes() + scores.tobytes(),
     )
+
+
+def multi_topk_to_proto(rows) -> data_pb2.Tensor:
+    """One shortlist per stream, packed as ids then scores."""
+    ids = torch.stack([r[0] for r in rows]).to(torch.int64).numpy()
+    scores = torch.stack([r[1] for r in rows]).to(torch.float32).numpy()
+    return data_pb2.Tensor(
+        shape=list(ids.shape),
+        dtype=MULTI_TOPK_DTYPE,
+        data=ids.tobytes() + scores.tobytes(),
+    )
+
+
+def proto_to_streams(p: data_pb2.Tensor) -> torch.Tensor:
+    """Candidate ids per stream, whatever form the last slice sent."""
+    if p.dtype == MULTI_TOPK_DTYPE:
+        streams, k = int(p.shape[0]), int(p.shape[1])
+        count = streams * k
+        ids = np.frombuffer(p.data, dtype=np.int64, count=count).reshape(streams, k)
+        return torch.from_numpy(ids.copy())
+    if p.dtype == TOPK_DTYPE:
+        k = int(p.shape[0])
+        ids = np.frombuffer(p.data, dtype=np.int64, count=k)
+        return torch.from_numpy(ids.copy()).reshape(1, k)
+    return proto_to_tensor(p)
 
 
 def proto_to_tensor(p: data_pb2.Tensor) -> torch.Tensor:
@@ -141,7 +167,9 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     use_cache=request.use_cache,
                     top_k=request.top_k,
                 )
-            if isinstance(out, tuple):
+            if isinstance(out, list) and out and isinstance(out[0], tuple):
+                payload = multi_topk_to_proto(out)
+            elif isinstance(out, tuple):
                 payload = topk_to_proto(*out)
             else:
                 payload = tensor_to_proto(out, accepts_bf16=request.accepts_bf16)
@@ -393,7 +421,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         if session is None:
             return data_pb2.AdvanceGenerationResponse(ok=False, error="unknown session")
         try:
-            nxt = session.advance(proto_to_tensor(request.streams))
+            nxt = session.advance(proto_to_streams(request.streams))
             return data_pb2.AdvanceGenerationResponse(
                 ok=True,
                 input_ids=tensor_to_proto(nxt) if nxt is not None else None,

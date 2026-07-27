@@ -241,6 +241,14 @@ class SliceRunner:
             return hidden
         if top_k > 0:
             logits = self._head(hidden[:, -1:, :])
+            if logits.dim() == 4:
+                # [batch, streams, position, vocab]: one shortlist per stream,
+                # so a model answering on four codebooks sends four hundred
+                # bytes instead of four full vocabularies.
+                return [
+                    self._topk_row(logits[0, stream, -1], top_k)
+                    for stream in range(logits.shape[1])
+                ]
             return self._topk_row(logits[0, -1], top_k)
         return self._head(hidden)
 

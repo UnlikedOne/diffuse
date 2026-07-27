@@ -135,8 +135,12 @@ class GenerationSession:
     def advance(self, streams: torch.Tensor) -> torch.Tensor | None:
         """Take what the last slice returned and say what to feed next."""
         decoder = self._decoder()
+        picked_ids = streams.dtype == torch.int64 and streams.dim() == 2
         if decoder is None:
-            token = int(streams.reshape(1, -1, streams.shape[-1])[0, -1].argmax())
+            if picked_ids:
+                token = int(streams[0, 0])
+            else:
+                token = int(streams.reshape(1, -1, streams.shape[-1])[0, -1].argmax())
             eos = getattr(
                 getattr(self.slice.model, "generation_config", None), "eos_token_id", None
             )
@@ -146,8 +150,11 @@ class GenerationSession:
                 return None
             return torch.tensor([[token]], dtype=torch.long)
 
-        # [batch, streams, position, vocab] -> one token per stream
-        picked = streams[:, :, -1, :].argmax(-1).reshape(-1, 1)
+        # Either a shortlist per stream, best first, or full scores to rank.
+        if picked_ids:
+            picked = streams[:, 0].reshape(-1, 1)
+        else:
+            picked = streams[:, :, -1, :].argmax(-1).reshape(-1, 1)
         self.buffer = torch.cat([self.buffer, picked], dim=-1)
         self.buffer = decoder.apply_delay_pattern_mask(
             self.buffer, self.mask[:, : self.buffer.shape[-1]]

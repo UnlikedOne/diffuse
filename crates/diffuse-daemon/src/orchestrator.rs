@@ -675,7 +675,9 @@ impl Orchestrator {
         memory: Option<Tensor>,
         session_id: &str,
     ) -> anyhow::Result<Tensor> {
-        self.forward_positioned(input, session_id, true, 0, None, memory)
+        // Ask for shortlists rather than whole vocabularies: the client only
+        // ever reads the best candidates, whatever the number of streams.
+        self.forward_positioned(input, session_id, true, DECODE_TOP_K, None, memory)
             .await
     }
 
