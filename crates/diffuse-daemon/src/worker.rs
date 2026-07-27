@@ -1,3 +1,44 @@
+#[derive(Clone, Debug, Default)]
+pub struct GenerativeStart {
+    pub first: Option<crate::worker::pb::Tensor>,
+    pub memory: Option<crate::worker::pb::Tensor>,
+    pub streams: u32,
+    pub kind: String,
+    pub shortlist: u32,
+    pub guidance: f32,
+    pub sample: bool,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub seed: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    pub guidance: f32,
+    pub sample: bool,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub seed: u64,
+}
+
+impl Default for Draw {
+    fn default() -> Self {
+        Self { guidance: 1.0, sample: false, temperature: 1.0, top_p: 1.0, seed: 0 }
+    }
+}
+
+impl GenerativeStart {
+    pub fn draw(&self) -> Draw {
+        Draw {
+            guidance: self.guidance,
+            sample: self.sample,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            seed: self.seed,
+        }
+    }
+}
+
 pub mod pb {
     tonic::include_proto!("diffuse.data");
 }
@@ -73,6 +114,7 @@ impl WorkerHandle {
         position_ids: Option<Tensor>,
         encoder_memory: Option<Tensor>,
         patch: Option<crate::compute::Patch>,
+        draw: Draw,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -86,6 +128,11 @@ impl WorkerHandle {
             accepts_bf16,
             position_ids,
             encoder_memory,
+            guidance: draw.guidance,
+            sample: draw.sample,
+            temperature: draw.temperature,
+            top_p: draw.top_p,
+            seed: draw.seed,
             patch_offset: patch.as_ref().map(|p| p.offset).unwrap_or(0),
             patch_sequence: patch.as_ref().map(|p| p.sequence).unwrap_or(0),
             branch: patch.as_ref().map(|p| p.branch.clone()).unwrap_or_default(),
@@ -335,7 +382,8 @@ impl WorkerHandle {
         text: &str,
         media: Vec<(String, Vec<u8>, String)>,
         max_new_tokens: u32,
-    ) -> anyhow::Result<(Option<Tensor>, Option<Tensor>, u32, String)> {
+        seed: u64,
+    ) -> anyhow::Result<GenerativeStart> {
         let attachments: Vec<pb::MediaAttachment> = media
             .into_iter()
             .map(|(kind, data, mime)| pb::MediaAttachment { kind, data, mime })
@@ -348,18 +396,25 @@ impl WorkerHandle {
                 media: attachments,
                 max_new_tokens,
                 accepts_bf16: true,
+                seed,
             }))
             .await?
             .into_inner();
         if !response.ok {
             anyhow::bail!("could not start generation: {}", response.error);
         }
-        Ok((
-            response.input_ids,
-            response.encoder_memory,
-            response.streams,
-            response.output_kind,
-        ))
+        Ok(GenerativeStart {
+            first: response.input_ids,
+            memory: response.encoder_memory,
+            streams: response.streams,
+            kind: response.output_kind,
+            shortlist: response.shortlist,
+            guidance: response.guidance,
+            sample: response.sample,
+            temperature: response.temperature,
+            top_p: response.top_p,
+            seed,
+        })
     }
 
     pub async fn advance_generation(

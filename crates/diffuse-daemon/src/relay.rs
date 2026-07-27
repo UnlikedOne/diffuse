@@ -309,6 +309,7 @@ pub async fn relay_compute(
     top_k: u32,
     accepts_bf16: bool,
     patch: Option<&crate::compute::Patch>,
+    draw: crate::worker::Draw,
 ) -> anyhow::Result<(crate::worker::pb::Tensor, u64, u32)> {
     use pb::ComputeRequest;
     let secret = my_kx.shared_secret(host_kx_public);
@@ -338,6 +339,11 @@ pub async fn relay_compute(
         patch_sequence: patch.map(|p| p.sequence).unwrap_or(0),
         branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
         layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
+        guidance: draw.guidance,
+        sample: draw.sample,
+        temperature: draw.temperature,
+        top_p: draw.top_p,
+        seed: draw.seed,
         encrypted_arguments: match patch {
             Some(p) if !p.arguments.is_empty() => diffuse_trust::transport::encrypt(
                 &secret,

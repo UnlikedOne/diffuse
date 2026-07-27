@@ -88,6 +88,7 @@ async fn network_self_heals_after_replica_death() {
 
     let mut orch = Orchestrator {
         patch: None,
+        draw: diffuse_daemon::worker::Draw::default(),
         model_id: MODEL.to_string(),
         stages: vec![
             Stage {

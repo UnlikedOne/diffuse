@@ -78,17 +78,24 @@ def multi_topk_to_proto(rows) -> data_pb2.Tensor:
     )
 
 
-def proto_to_streams(p: data_pb2.Tensor) -> torch.Tensor:
-    """Candidate ids per stream, whatever form the last slice sent."""
+def proto_to_streams(p: data_pb2.Tensor):
+    """Candidates and their scores per stream, whatever form the last slice sent."""
     if p.dtype == MULTI_TOPK_DTYPE:
         streams, k = int(p.shape[0]), int(p.shape[1])
         count = streams * k
         ids = np.frombuffer(p.data, dtype=np.int64, count=count).reshape(streams, k)
-        return torch.from_numpy(ids.copy())
+        scores = np.frombuffer(
+            p.data, dtype=np.float32, offset=count * 8, count=count
+        ).reshape(streams, k)
+        return torch.from_numpy(ids.copy()), torch.from_numpy(scores.copy())
     if p.dtype == TOPK_DTYPE:
         k = int(p.shape[0])
         ids = np.frombuffer(p.data, dtype=np.int64, count=k)
-        return torch.from_numpy(ids.copy()).reshape(1, k)
+        scores = np.frombuffer(p.data, dtype=np.float32, offset=k * 8, count=k)
+        return (
+            torch.from_numpy(ids.copy()).reshape(1, k),
+            torch.from_numpy(scores.copy()).reshape(1, k),
+        )
     return proto_to_tensor(p)
 
 
@@ -191,6 +198,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     top_k=request.top_k,
                     position_ids=positions,
                     memory=memory,
+                    guidance=request.guidance or 1.0,
+                    sample=request.sample,
+                    temperature=request.temperature or 1.0,
+                    seed=request.seed,
+                    top_p=request.top_p or 1.0,
                 )
             elif self.scheduler is not None:
                 out = self.scheduler.submit(
@@ -392,7 +404,9 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             processor = self.slice.processor or self.slice.tokenizer
             inputs = self._build_inputs(processor, request)
             session = GenerationSession(
-                self.slice, max_new_tokens=request.max_new_tokens or 256
+                self.slice,
+                max_new_tokens=request.max_new_tokens or 256,
+                seed=int(request.seed) if request.seed else None,
             )
             first = session.begin(inputs)
             self.sessions.start(request.session_id, session)
@@ -406,6 +420,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 ),
                 streams=session.stream_count(),
                 output_kind=session.output_kind(),
+                guidance=session.guidance(),
+                shortlist=session.top_k() if session.sampling() else session.shortlist_size(),
+                sample=session.sampling(),
+                temperature=session.temperature(),
+                top_p=session.top_p(),
             )
         except Exception as exc:
             log.exception("begin generation failed")

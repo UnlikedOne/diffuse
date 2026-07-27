@@ -7,7 +7,7 @@ import torch
 class GenerationSession:
     """Owns the generation state for one request, on the client's own machine."""
 
-    def __init__(self, model_slice, max_new_tokens: int = 256):
+    def __init__(self, model_slice, max_new_tokens: int = 256, seed: int | None = None):
         self.slice = model_slice
         self.max_new_tokens = max_new_tokens
         self.memory = None
@@ -15,6 +15,52 @@ class GenerationSession:
         self.mask = None
         self.produced: list[int] = []
         self.finished = False
+        self._effective = None
+        self.seed = seed
+
+    def _config(self):
+        """The settings generation would actually run with.
+
+        A checkpoint often leaves sampling unset and lets the library fill it
+        in, so reading generation_config alone reports no top-k where the model
+        in fact truncates at fifty. Asking for the prepared config gives what
+        model.generate() would use, without this having to know any defaults."""
+        if self._effective is None:
+            model = self.slice.model
+            prepare = getattr(model, "_prepare_generation_config", None)
+            if prepare is not None:
+                try:
+                    self._effective = prepare(None)[0]
+                except Exception:
+                    self._effective = None
+            if self._effective is None:
+                self._effective = getattr(model, "generation_config", None)
+        return self._effective
+
+    def top_k(self) -> int:
+        value = getattr(self._config(), "top_k", None)
+        return int(value) if value else 0
+
+    def top_p(self) -> float:
+        value = getattr(self._config(), "top_p", None)
+        return float(value) if value else 1.0
+
+    def guidance(self) -> float:
+        scale = getattr(self._config(), "guidance_scale", None)
+        return float(scale) if scale and float(scale) > 1.0 else 1.0
+
+    def sampling(self) -> bool:
+        return bool(getattr(self._config(), "do_sample", False))
+
+    def temperature(self) -> float:
+        value = getattr(self._config(), "temperature", None)
+        return float(value) if value else 1.0
+
+    def shortlist_size(self) -> int:
+        return 1 if self.sampling() else 8
+
+    def _pick(self, scores: torch.Tensor) -> torch.Tensor:
+        return scores.argmax(-1)
 
 
     def _decoder(self):
@@ -95,6 +141,10 @@ class GenerationSession:
             encoded = encoder(**kwargs).last_hidden_state
             projection = getattr(model, "enc_to_dec_proj", None)
             self.memory = projection(encoded) if projection is not None else encoded
+            if self.guidance() > 1.0:
+                self.memory = torch.cat(
+                    [self.memory, torch.zeros_like(self.memory)], dim=0
+                )
 
         decoder = self._decoder()
         if decoder is None:
@@ -119,15 +169,27 @@ class GenerationSession:
         self.buffer = decoder.apply_delay_pattern_mask(
             self.buffer, self.mask[:, : self.buffer.shape[-1]]
         )
-        return self.buffer[:, -1:].reshape(1, streams, 1)
+        return self._feed(self.buffer[:, -1:], streams)
+
+    def _feed(self, columns, streams):
+        step = columns.reshape(1, streams, 1)
+        if self.guidance() > 1.0:
+            step = step.repeat(2, 1, 1)
+        return step
 
     @torch.inference_mode()
     def advance(self, streams: torch.Tensor) -> torch.Tensor | None:
         """Take what the last slice returned and say what to feed next."""
         decoder = self._decoder()
-        picked_ids = streams.dtype == torch.int64 and streams.dim() == 2
+        shortlist = isinstance(streams, tuple)
+        if shortlist:
+            ids, scores = streams
+            chosen = ids.gather(-1, self._pick(scores).unsqueeze(-1)).squeeze(-1)
+        picked_ids = not shortlist and streams.dtype == torch.int64 and streams.dim() == 2
         if decoder is None:
-            if picked_ids:
+            if shortlist:
+                token = int(chosen.reshape(-1)[0])
+            elif picked_ids:
                 token = int(streams[0, 0])
             else:
                 token = int(streams.reshape(1, -1, streams.shape[-1])[0, -1].argmax())
@@ -140,7 +202,9 @@ class GenerationSession:
                 return None
             return torch.tensor([[token]], dtype=torch.long)
 
-        if picked_ids:
+        if shortlist:
+            picked = chosen.reshape(-1, 1)
+        elif picked_ids:
             picked = streams[:, 0].reshape(-1, 1)
         else:
             picked = streams[:, :, -1, :].argmax(-1).reshape(-1, 1)
@@ -151,8 +215,7 @@ class GenerationSession:
         if self.buffer.shape[-1] >= self.mask.shape[-1]:
             self.finished = True
             return None
-        count = self.stream_count()
-        return self.buffer[:, -1:].reshape(1, count, 1)
+        return self._feed(self.buffer[:, -1:], self.stream_count())
 
     @torch.inference_mode()
     def finish(self) -> tuple[bytes, str, str]:

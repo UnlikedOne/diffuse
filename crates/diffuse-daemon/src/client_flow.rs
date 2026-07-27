@@ -56,6 +56,7 @@ impl ClientSession {
                 None,
                 None,
                 None,
+                crate::worker::Draw::default(),
             )
             .await?;
 
@@ -78,6 +79,7 @@ impl ClientSession {
             None,
             None,
             None,
+            crate::worker::Draw::default(),
         )
         .await?;
 

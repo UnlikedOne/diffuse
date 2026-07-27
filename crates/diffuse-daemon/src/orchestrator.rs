@@ -94,6 +94,7 @@ pub struct Orchestrator {
     pub session_prefill: Option<Tensor>,
     pub session_positions: Option<Tensor>,
     pub patch: Option<crate::compute::Patch>,
+    pub draw: crate::worker::Draw,
 }
 
 pub const DECODE_TOP_K: u32 = 8;
@@ -159,6 +160,7 @@ impl Stage {
         position_ids: Option<&Tensor>,
         encoder_memory: Option<&Tensor>,
         patch: Option<&crate::compute::Patch>,
+        draw: crate::worker::Draw,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -177,7 +179,7 @@ impl Stage {
                         .run_slice(
                             model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
                             accepts_bf16, position_ids.cloned(), encoder_memory.cloned(),
-                            patch.cloned(),
+                            patch.cloned(), draw,
                         )
                         .await
                         .map(|t| {
@@ -210,6 +212,7 @@ impl Stage {
                                 position_ids,
                                 encoder_memory,
                                 patch,
+                                draw,
                             )
                             .await
                         }
@@ -219,7 +222,7 @@ impl Stage {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
                                         start, end, session_id, &input, top_k, accepts_bf16,
-                                        position_ids, encoder_memory, patch,
+                                        position_ids, encoder_memory, patch, draw,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -251,6 +254,7 @@ impl Stage {
                         top_k,
                         accepts_bf16,
                         patch,
+                        draw,
                     )
                     .await
                 }
@@ -493,6 +497,7 @@ impl Orchestrator {
             position_ids,
             encoder_memory,
             patch_for_chain.as_ref(),
+            self.draw,
         )
         .await;
 
@@ -597,6 +602,7 @@ impl Orchestrator {
         let mut compute_sum = 0u64;
         let mut network_sum = 0u64;
         let patch = self.patch.clone();
+        let draw = self.draw;
         for (idx, stage) in self.stages.iter_mut().enumerate() {
             let stage_top_k = if idx == last_stage { top_k } else { 0 };
             t = stage
@@ -611,6 +617,7 @@ impl Orchestrator {
                     position_ids.as_ref(),
                     encoder_memory.as_ref(),
                     patch.as_ref(),
+                    if idx == last_stage { draw } else { crate::worker::Draw::default() },
                 )
                 .await?;
             compute_sum += stage.last_compute_ms;
@@ -673,9 +680,16 @@ impl Orchestrator {
         input: Tensor,
         memory: Option<Tensor>,
         session_id: &str,
+        shortlist: u32,
+        draw: crate::worker::Draw,
     ) -> anyhow::Result<Tensor> {
-        self.forward_positioned(input, session_id, true, DECODE_TOP_K, None, memory)
-            .await
+        let wanted = if shortlist == 0 { DECODE_TOP_K } else { shortlist };
+        self.draw = draw;
+        let out = self
+            .forward_positioned(input, session_id, true, wanted, None, memory)
+            .await;
+        self.draw = crate::worker::Draw::default();
+        out
     }
 
     pub async fn generate_from_embeddings<F>(
@@ -1006,6 +1020,7 @@ pub async fn build_from_registry(
     }
     Ok(Orchestrator {
         patch: None,
+        draw: crate::worker::Draw::default(),
         model_id: model_id.to_string(),
         stages,
         spare_endpoints,

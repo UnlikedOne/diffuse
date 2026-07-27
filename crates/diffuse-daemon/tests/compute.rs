@@ -106,6 +106,7 @@ async fn daemon_delegates_slice_over_encrypted_channel() {
         None,
         None,
         None,
+        diffuse_daemon::worker::Draw::default(),
     )
     .await
     .expect("encrypted delegation should succeed");

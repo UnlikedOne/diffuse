@@ -28,6 +28,11 @@ message ComputeRequest {
   string branch = 14;
   string layout = 15;
   bytes encrypted_arguments = 16;
+  float guidance = 17;
+  bool sample = 18;
+  float temperature = 19;
+  uint64 seed = 20;
+  float top_p = 21;
 }
 
 message ComputeResponse {

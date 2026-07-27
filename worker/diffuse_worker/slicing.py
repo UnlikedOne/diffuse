@@ -190,15 +190,20 @@ def _find_final_norm(backbone, layers_attr: str):
     return candidates[-1] if candidates else None
 
 
+_POSITION_NAMES = ("wpe", "position_embeddings", "embed_positions", "positional_embedding")
+
+
 def _find_position_embeddings(backbone, input_embed):
+    """The module that adds a position to every embedding, if the model has one.
+
+    Requiring an nn.Embedding here missed every sinusoidal table, which is a
+    plain Module holding a buffer. MusicGen and Whisper both keep theirs that
+    way, and a slice that never adds them answers from the right weights in the
+    wrong order."""
     for name, child in backbone.named_children():
-        if child is input_embed:
+        if child is input_embed or name not in _POSITION_NAMES:
             continue
-        if isinstance(child, nn.Embedding) and name in (
-            "wpe",
-            "position_embeddings",
-            "embed_positions",
-        ):
+        if isinstance(child, nn.Module):
             return child
     return None
 

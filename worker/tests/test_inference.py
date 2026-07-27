@@ -49,3 +49,46 @@ def _total(model_id: str) -> int:
 
     cfg = AutoConfig.from_pretrained(model_id)
     return getattr(cfg, "num_hidden_layers", None) or cfg.n_layer
+
+def test_a_sinusoidal_position_table_is_found_even_though_it_is_not_an_embedding():
+    import torch.nn as nn
+
+    from diffuse_worker.slicing import _find_position_embeddings
+
+    class Sinusoidal(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("weights", torch.zeros(8, 4))
+
+    class Backbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(10, 4)
+            self.embed_positions = Sinusoidal()
+
+    backbone = Backbone()
+    found = _find_position_embeddings(backbone, backbone.embed_tokens)
+
+    assert found is backbone.embed_positions
+
+
+def test_positions_are_asked_for_with_the_embeddings_not_the_stream_ids():
+    import torch.nn as nn
+
+    from diffuse_worker.inference import SliceRunner
+
+    seen = {}
+
+    class Table(nn.Module):
+        def forward(self, x, offset=0):
+            seen["shape"] = tuple(x.shape)
+            return torch.zeros(x.shape[0], x.shape[1], 4)
+
+    runner = SliceRunner.__new__(SliceRunner)
+    runner.slice = type("S", (), {"pos_embed": Table()})()
+
+    hidden = torch.zeros(2, 1, 4)
+    ids = torch.zeros(2, 4, 1, dtype=torch.long)
+    runner._absolute_positions(hidden, ids, 0)
+
+    assert seen["shape"] == (2, 1, 4)

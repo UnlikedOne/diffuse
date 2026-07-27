@@ -24,6 +24,7 @@ const FAINT: Color = Color::Rgb(84, 96, 116);
 const SURFACE: Color = Color::Rgb(24, 28, 38);
 const SELECTED: Color = Color::Rgb(38, 46, 62);
 
+#[derive(Clone)]
 pub struct Listing {
     pub card: ModelCard,
     fits_whole: bool,
@@ -90,6 +91,31 @@ struct App {
     authenticated: bool,
     editing: bool,
     status: String,
+    busy: bool,
+    history: Vec<Page>,
+}
+
+#[derive(Clone)]
+struct Page {
+    query: String,
+    listings: Vec<Listing>,
+    selected: Option<usize>,
+}
+
+impl App {
+    fn page(&self) -> Page {
+        Page {
+            query: self.query.clone(),
+            listings: self.listings.clone(),
+            selected: self.state.selected(),
+        }
+    }
+
+    fn restore(&mut self, page: Page) {
+        self.query = page.query;
+        self.listings = page.listings;
+        self.state.select(page.selected);
+    }
 }
 
 impl App {
@@ -290,6 +316,27 @@ fn detail(area: Rect, buf: &mut Buffer, app: &App) {
     Paragraph::new(lines).wrap(Wrap { trim: true }).render(inner, buf);
 }
 
+fn waiting(area: Rect, buf: &mut Buffer, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(FAINT))
+        .title(Span::styled(" searching ", Style::default().fg(MUTED)));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("   asking hugging face for \"{}\"", app.query),
+            Style::default().fg(ACCENT),
+        )),
+        Line::from(Span::styled(
+            "   the answer is fetched live, so this takes a moment",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    Paragraph::new(lines).render(inner, buf);
+}
+
 fn footer(area: Rect, buf: &mut Buffer, app: &App) {
     let keys = if app.editing {
         vec![
@@ -306,6 +353,11 @@ fn footer(area: Rect, buf: &mut Buffer, app: &App) {
             Span::styled(" search   ", Style::default().fg(MUTED)),
             Span::styled(" enter ", Style::default().fg(SURFACE).bg(MINT)),
             Span::styled(" host it   ", Style::default().fg(MUTED)),
+            Span::styled(" esc ", Style::default().fg(SURFACE).bg(FAINT)),
+            Span::styled(
+                if app.history.is_empty() { " back   " } else { " back to the previous list   " },
+                Style::default().fg(if app.history.is_empty() { FAINT } else { MUTED }),
+            ),
             Span::styled(" q ", Style::default().fg(SURFACE).bg(FAINT)),
             Span::styled(" quit", Style::default().fg(MUTED)),
         ]
@@ -328,6 +380,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     banner(chunks[0], frame.buffer_mut(), app);
     search_bar(chunks[1], frame.buffer_mut(), app);
+
+    if app.busy {
+        waiting(chunks[2], frame.buffer_mut(), app);
+        footer(chunks[3], frame.buffer_mut(), app);
+        return;
+    }
 
     let body =
         Layout::horizontal([Constraint::Percentage(63), Constraint::Percentage(37)]).split(chunks[2]);
@@ -387,10 +445,23 @@ pub async fn browse(
     worker: &mut WorkerHandle,
     caps: &[ModelCapacity],
 ) -> anyhow::Result<Option<String>> {
-    let (cards, available_bytes, device, authenticated, account) =
-        worker.search_models("", 60, true).await?;
+    crate::tui::hush();
+    let (cards, available_bytes, device, authenticated, account) = {
+        let spinner = crate::tui::spinner("reaching hugging face");
+        let fetched = worker.search_models("", 60, true).await;
+        spinner.finish_and_clear();
+        match fetched {
+            Ok(v) => v,
+            Err(e) => {
+                crate::tui::unhush();
+                return Err(e);
+            }
+        }
+    };
 
     let mut app = App {
+        busy: false,
+        history: Vec::new(),
         query: String::new(),
         listings: build_listings(cards, available_bytes, caps),
         state: ListState::default(),
@@ -414,6 +485,7 @@ pub async fn browse(
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    crate::tui::unhush();
     outcome
 }
 
@@ -444,10 +516,15 @@ async fn run<B: Backend>(
                 }
                 KeyCode::Enter => {
                     app.editing = false;
-                    app.status = "searching hugging face...".into();
+                    app.busy = true;
+                    app.status = String::new();
+                    let previous = app.page();
                     terminal.draw(|frame| draw(frame, app))?;
-                    match worker.search_models(&app.query, 60, true).await {
+                    let found = worker.search_models(&app.query, 60, true).await;
+                    app.busy = false;
+                    match found {
                         Ok((cards, bytes, device, auth, account)) => {
+                            app.history.push(previous);
                             app.available_bytes = bytes;
                             app.device = device;
                             app.authenticated = auth;
@@ -461,7 +538,10 @@ async fn run<B: Backend>(
                                 String::new()
                             };
                         }
-                        Err(e) => app.status = format!("search failed: {}", e),
+                        Err(e) => {
+                            app.restore(previous);
+                            app.status = format!("search failed: {}", e);
+                        }
                     }
                 }
                 KeyCode::Backspace => {
@@ -474,7 +554,14 @@ async fn run<B: Backend>(
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+            KeyCode::Char('q') => return Ok(None),
+            KeyCode::Esc => match app.history.pop() {
+                Some(page) => {
+                    app.restore(page);
+                    app.status = String::new();
+                }
+                None => return Ok(None),
+            },
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(None),
             KeyCode::Char('/') => {
                 app.editing = true;
@@ -598,6 +685,8 @@ mod tests {
             card("openai/whisper-small", 244_000_000, 12, &["text"], "unsupported"),
         ];
         let mut app = App {
+            busy: false,
+            history: Vec::new(),
             query: String::new(),
             listings: build_listings(cards, 12_000_000_000, &[]),
             state: ListState::default(),
@@ -668,5 +757,32 @@ mod tests {
         let mut app = sample_app();
         let screen = render(&mut app, 80, 20);
         assert!(screen.contains("DIFFUSE"));
+    }
+
+    #[test]
+    fn a_search_in_flight_shows_waiting_instead_of_a_half_drawn_list() {
+        let mut app = sample_app();
+        app.busy = true;
+        app.query = "flux".into();
+        let screen = render(&mut app, 100, 30);
+
+        assert!(screen.contains("asking hugging face"));
+        assert!(!screen.contains("Qwen2.5-0.5B-Instruct"));
+    }
+
+    #[test]
+    fn escape_returns_to_the_list_the_search_replaced() {
+        let mut app = sample_app();
+        let first = app.listings.len();
+        let before = app.page();
+        app.history.push(before);
+        app.listings.clear();
+        app.query = "nothing".into();
+
+        let page = app.history.pop().expect("a page was pushed");
+        app.restore(page);
+
+        assert_eq!(app.listings.len(), first);
+        assert!(app.query.is_empty());
     }
 }

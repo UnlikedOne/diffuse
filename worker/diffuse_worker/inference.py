@@ -14,6 +14,7 @@ class SliceRunner:
         self.cache_seen = {}
         self.seq_lens = {}
         self.rope_pos = {}
+        self.samplers = {}
         self._sessions_lock = threading.Lock()
         self._layer_params = self._detect_layer_params()
         self._cache_indices = self._detect_cache_indices()
@@ -75,28 +76,35 @@ class SliceRunner:
             if ids.dim() == 2:
                 ids = ids.unsqueeze(1).expand(-1, len(tables), -1)
             hidden = sum(tables[k](ids[:, k]) for k in range(len(tables)))
-            positions = self._absolute_positions(ids, start_pos)
+            positions = self._absolute_positions(hidden, ids, start_pos)
         else:
             hidden = tables(input_ids)
-            positions = self._absolute_positions(input_ids, start_pos)
+            positions = self._absolute_positions(hidden, input_ids, start_pos)
         if positions is not None:
             hidden = hidden + positions
         return hidden
 
-    def _absolute_positions(self, ids: torch.Tensor, start_pos: int):
+    def _absolute_positions(self, hidden: torch.Tensor, ids: torch.Tensor, start_pos: int):
         """Learned or sinusoidal positions added to the embedding.
 
-        Signatures differ: some take the ids and how far the session already
-        ran, others a plain index tensor. Both are tried rather than assumed."""
+        Signatures differ: a sinusoidal table reads the length off the
+        embeddings it is handed, a learned one takes plain indices. The
+        embeddings are offered first because they carry the one shape that is
+        unambiguous: ids of a multi-stream model are [batch, streams, length],
+        and a table reading shape[:2] off those would take the stream count for
+        a length."""
         pos_embed = getattr(self.slice, "pos_embed", None)
         if pos_embed is None:
             return None
-        try:
-            return pos_embed(ids, start_pos)
-        except (TypeError, RuntimeError, IndexError):
-            pass
+        for candidate in (hidden, ids):
+            try:
+                positions = pos_embed(candidate, start_pos)
+            except (TypeError, RuntimeError, IndexError):
+                continue
+            if positions.shape[-2:] == hidden.shape[-2:]:
+                return positions
         index = torch.arange(
-            start_pos, start_pos + ids.shape[-1], device=ids.device
+            start_pos, start_pos + hidden.shape[-2], device=hidden.device
         )
         try:
             return pos_embed(index)
@@ -160,6 +168,14 @@ class SliceRunner:
             hidden = out[0] if isinstance(out, tuple) else out
         return hidden
     
+    @staticmethod
+    def _guide(logits: torch.Tensor, guidance: float) -> torch.Tensor:
+        if guidance <= 1.0 or logits.shape[0] != 2:
+            return logits
+        conditional, unconditional = logits[0], logits[1]
+        combined = unconditional + (conditional - unconditional) * guidance
+        return combined.unsqueeze(0)
+
     def _head(self, hidden: torch.Tensor) -> torch.Tensor:
         if self.slice.norm is not None:
             hidden = self.slice.norm(hidden)
@@ -171,6 +187,48 @@ class SliceRunner:
     def stream_count(self) -> int:
         heads = self.slice.lm_head
         return len(heads) if isinstance(heads, torch.nn.ModuleList) else 1
+
+    def _sampler(self, session_id: str, seed: int) -> torch.Generator:
+        with self._sessions_lock:
+            generator = self.samplers.get(session_id)
+            if generator is None:
+                generator = torch.Generator()
+                generator.manual_seed(int(seed) if seed else torch.seed() % (2**63))
+                self.samplers[session_id] = generator
+            return generator
+
+    def _draw(self, logits, session_id, temperature, seed, top_k=0, top_p=1.0):
+        """Draw from the whole distribution, where the whole distribution is.
+
+        Sampling from a shortlist is not the same draw: truncating renormalises
+        the mass onto the strongest candidates and the answer comes out harder
+        than the model meant it. The last slice holds the full row, so the draw
+        happens here and a handful of token ids travel instead of whole
+        vocabularies."""
+        generator = self._sampler(session_id, seed)
+        rows = logits.reshape(-1, logits.shape[-1]) if logits.dim() == 4 else logits[:, -1]
+        warmed = rows.to(torch.float32) / max(float(temperature), 1e-5)
+        warmed = self._truncate(warmed, top_k, top_p)
+        probabilities = torch.softmax(warmed, dim=-1)
+        drawn = torch.multinomial(probabilities, 1, generator=generator)
+        scores = warmed.gather(-1, drawn)
+        return [
+            (drawn[i].to(torch.int64), scores[i].to(torch.float32))
+            for i in range(drawn.shape[0])
+        ]
+
+    @staticmethod
+    def _truncate(scores, top_k, top_p):
+        if top_k and top_k < scores.shape[-1]:
+            threshold = scores.topk(int(top_k), dim=-1).values[..., -1, None]
+            scores = scores.masked_fill(scores < threshold, float("-inf"))
+        if top_p and top_p < 1.0:
+            ordered, order = scores.sort(dim=-1, descending=False)
+            cumulative = ordered.softmax(dim=-1).cumsum(dim=-1)
+            drop = cumulative <= (1 - top_p)
+            drop[..., -1:] = False
+            scores = scores.masked_fill(drop.scatter(-1, order, drop), float("-inf"))
+        return scores
 
     def _topk_row(self, row: torch.Tensor, top_k: int):
         k = min(top_k, row.shape[-1])
@@ -194,6 +252,11 @@ class SliceRunner:
         top_k=0,
         position_ids=None,
         memory=None,
+        guidance=1.0,
+        sample=False,
+        temperature=1.0,
+        seed=0,
+        top_p=1.0,
     ):
         cache = None
         start_pos = 0
@@ -222,15 +285,18 @@ class SliceRunner:
                     self.rope_pos[session_id] = rope_start + seq_len
         if not self.slice.is_last():
             return hidden
+        if sample:
+            logits = self._guide(self._head(hidden[:, -1:, :]), guidance)
+            return self._draw(logits, session_id, temperature, seed, top_k, top_p)
         if top_k > 0:
-            logits = self._head(hidden[:, -1:, :])
+            logits = self._guide(self._head(hidden[:, -1:, :]), guidance)
             if logits.dim() == 4:
                 return [
                     self._topk_row(logits[0, stream, -1], top_k)
                     for stream in range(logits.shape[1])
                 ]
             return self._topk_row(logits[0, -1], top_k)
-        return self._head(hidden)
+        return self._guide(self._head(hidden), guidance)
 
     @torch.inference_mode()
     def run_batch(self, items, top_k=0):
@@ -338,6 +404,7 @@ class SliceRunner:
             self.cache_seen.pop(session_id, None)
             self.seq_lens.pop(session_id, None)
             self.rope_pos.pop(session_id, None)
+            self.samplers.pop(session_id, None)
 
 MODALITIES = (
     (

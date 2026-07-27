@@ -87,7 +87,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
     };
 
     let local_activations = client_w
-        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false, None, None, None)
+        .run_slice(MODEL, 0, 2, "client-session", 0, input, false, 0, false, None, None, None, diffuse_daemon::worker::Draw::default())
         .await
         .expect("local first-slice execution");
 
@@ -126,6 +126,7 @@ async fn prompt_never_leaves_client_only_activations_do() {
         None,
         None,
         None,
+        diffuse_daemon::worker::Draw::default(),
     )
     .await
     .expect("remote completion over encrypted channel");

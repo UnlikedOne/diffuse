@@ -229,6 +229,7 @@ pub async fn request_slice(
     position_ids: Option<&Tensor>,
     encoder_memory: Option<&Tensor>,
     patch: Option<&Patch>,
+    draw: crate::worker::Draw,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -265,6 +266,11 @@ pub async fn request_slice(
             branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
             layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
             encrypted_arguments,
+            guidance: draw.guidance,
+            sample: draw.sample,
+            temperature: draw.temperature,
+            top_p: draw.top_p,
+            seed: draw.seed,
         })
         .await?
         .into_inner();
@@ -291,6 +297,7 @@ pub async fn request_slice_chained(
     position_ids: Option<&Tensor>,
     encoder_memory: Option<&Tensor>,
     patch: Option<&Patch>,
+    draw: crate::worker::Draw,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -327,6 +334,11 @@ pub async fn request_slice_chained(
             branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
             layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
             encrypted_arguments,
+            guidance: draw.guidance,
+            sample: draw.sample,
+            temperature: draw.temperature,
+            top_p: draw.top_p,
+            seed: draw.seed,
         })
         .await?
         .into_inner();
@@ -417,6 +429,13 @@ pub async fn process_compute_request(
             positions,
             memory,
             patch,
+            crate::worker::Draw {
+                guidance: req.guidance,
+                sample: req.sample,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                seed: req.seed,
+            },
         )
         .await?
     };
@@ -466,6 +485,13 @@ pub async fn process_chained_request(
             positions.clone(),
             memory.clone(),
             patch.clone(),
+            crate::worker::Draw {
+                guidance: req.guidance,
+                sample: req.sample,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                seed: req.seed,
+            },
         )
         .await?
     };
@@ -492,6 +518,11 @@ pub async fn process_chained_request(
                 patch_sequence: req.patch_sequence,
                 branch: req.branch.clone(),
                 layout: req.layout.clone(),
+                guidance: req.guidance,
+                sample: req.sample,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                seed: req.seed,
                 encrypted_arguments: match &patch {
                     Some(p) if !p.arguments.is_empty() => {
                         encrypt(&next_secret, &arguments_to_bytes(&p.arguments))?

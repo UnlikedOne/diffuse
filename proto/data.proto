@@ -25,6 +25,11 @@ message SliceRequest {
   repeated DiffusionArgument arguments = 14;
   string branch = 15;
   string layout = 16;
+  float guidance = 17;
+  bool sample = 18;
+  float temperature = 19;
+  uint64 seed = 20;
+  float top_p = 21;
 }
 
 message DiffusionArgument {
@@ -164,6 +169,7 @@ message SearchModelsResponse {
 }
 
 message BeginGenerationRequest {
+  uint64 seed = 20;
   string session_id = 1;
   string text = 2;
   repeated MediaAttachment media = 3;
@@ -172,6 +178,11 @@ message BeginGenerationRequest {
 }
 
 message BeginGenerationResponse {
+  float guidance = 20;
+  uint32 shortlist = 21;
+  bool sample = 22;
+  float temperature = 23;
+  float top_p = 24;
   bool ok = 1;
   string error = 2;
   Tensor input_ids = 3;

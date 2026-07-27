@@ -97,10 +97,13 @@ accumulation, not from anything being wrong.
 
 ## What was not optimised, and why you should know
 
-**Classifier-free guidance is not implemented.** MusicGen enables it by default
-with a factor of 3, which means two passes per token. Diffuse runs one. The
-result is real audio, of lower quality than the same model run whole with
-guidance on.
+**Guidance and sampling are done where the numbers are.** A model that asks for
+classifier-free guidance runs both branches, and the last slice combines them
+before anything is shortened — it is the only place holding both. Sampling
+happens there too, over the whole distribution: drawing from a shortlist is not
+the same draw, because truncating moves the mass onto the strongest candidates
+and the answer comes out harder than the model meant it. Four token ids travel
+instead of four vocabularies.
 
 **Round-trip latency is untouched.** Chaining moves trips off your link; it does
 not remove them. If your nodes are spread across continents, the round trips

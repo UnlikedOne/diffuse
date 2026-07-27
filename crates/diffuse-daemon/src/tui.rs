@@ -1,3 +1,42 @@
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn hush() {
+    QUIET.store(true, Ordering::Relaxed);
+}
+
+pub fn unhush() {
+    QUIET.store(false, Ordering::Relaxed);
+}
+
+pub struct GatedStderr;
+
+impl Write for GatedStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if QUIET.load(Ordering::Relaxed) {
+            return Ok(buf.len());
+        }
+        std::io::stderr().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if QUIET.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        std::io::stderr().flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GatedStderr {
+    type Writer = GatedStderr;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        GatedStderr
+    }
+}
+
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};

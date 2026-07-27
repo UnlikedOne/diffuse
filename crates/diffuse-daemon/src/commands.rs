@@ -59,6 +59,8 @@ async fn run_generative(
     streams: u32,
     kind: &str,
     attachments: &[Attachment],
+    shortlist: u32,
+    draw: crate::worker::Draw,
 ) -> anyhow::Result<String> {
     for item in attachments {
         println!(
@@ -81,6 +83,19 @@ async fn run_generative(
             "→".bright_blue()
         );
     }
+    if draw.guidance > 1.0 {
+        println!(
+            "  {} guided by a factor of {}, so every step runs twice",
+            "→".bright_blue(),
+            format!("{:.1}", draw.guidance).bright_white()
+        );
+    }
+    if draw.sample {
+        println!(
+            "  {} sampled on the last slice, where the whole distribution is",
+            "→".bright_blue()
+        );
+    }
     println!("  {} generating over encrypted channel...", "→".bright_blue());
     println!();
 
@@ -88,7 +103,7 @@ async fn run_generative(
     let mut produced = 0usize;
     loop {
         let out = orch
-            .forward_streams(step, memory.clone(), session_id)
+            .forward_streams(step, memory.clone(), session_id, shortlist, draw)
             .await?;
         match worker.advance_generation(session_id, out).await? {
             Some(next) => {
@@ -845,7 +860,7 @@ pub async fn query(
         .map(|a| (a.kind.clone(), a.data.clone(), a.mime.clone()))
         .collect();
     let generative = tokenizer_worker
-        .begin_generation(&session_id, prompt, media.clone(), max_tokens as u32)
+        .begin_generation(&session_id, prompt, media.clone(), max_tokens as u32, seed)
         .await;
 
     let generative = match generative {
@@ -855,17 +870,20 @@ pub async fn query(
             None
         }
     };
-    if let Some((Some(first), memory, streams, kind)) = generative {
-        if kind != "text" || memory.is_some() {
+    if let Some(started) = generative.filter(|s| s.first.is_some()) {
+        if started.kind != "text" || started.memory.is_some() {
+            let draw = started.draw();
             run_generative(
                 &mut orch,
                 &mut tokenizer_worker,
                 &session_id,
-                first,
-                memory,
-                streams,
-                &kind,
+                started.first.clone().unwrap(),
+                started.memory.clone(),
+                started.streams,
+                &started.kind,
                 &attachments,
+                started.shortlist,
+                draw,
             )
             .await?;
             return Ok(());
@@ -1140,21 +1158,26 @@ pub async fn chat(
             .collect();
 
         match tokenizer_worker
-            .begin_generation(&session, &msg, media.clone(), max_tokens as u32)
+            .begin_generation(&session, &msg, media.clone(), max_tokens as u32, 0)
             .await
         {
-            Ok((first, encoder_memory, streams, kind)) => match first {
-                Some(first) if kind != "text" || encoder_memory.is_some() => {
+            Ok(started) => match started.first.clone() {
+                Some(first)
+                    if started.kind != "text" || started.memory.is_some() =>
+                {
+                    let draw = started.draw();
                     println!();
                     match run_generative(
                         &mut orch,
                         &mut tokenizer_worker,
                         &session,
                         first,
-                        encoder_memory,
-                        streams,
-                        &kind,
+                        started.memory.clone(),
+                        started.streams,
+                        &started.kind,
                         &pending,
+                        started.shortlist,
+                        draw,
                     )
                     .await
                     {
