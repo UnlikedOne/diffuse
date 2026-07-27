@@ -89,6 +89,15 @@ pub enum Command {
         bootstrap: Vec<String>,
         #[arg(long, default_value_t = 80)]
         max_tokens: usize,
+        /// Denoising steps, for a model that answers by diffusion.
+        #[arg(long, default_value_t = 20)]
+        steps: usize,
+        /// Patches each denoising step is cut into across the nodes.
+        #[arg(long, default_value_t = 4)]
+        patches: usize,
+        /// Seed, so the same prompt gives the same answer.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
     },
     /// List models currently hosted on the network
     Models {

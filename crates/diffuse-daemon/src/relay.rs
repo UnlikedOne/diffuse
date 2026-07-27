@@ -308,6 +308,7 @@ pub async fn relay_compute(
     activations: &crate::worker::pb::Tensor,
     top_k: u32,
     accepts_bf16: bool,
+    patch: Option<&crate::compute::Patch>,
 ) -> anyhow::Result<(crate::worker::pb::Tensor, u64, u32)> {
     use pb::ComputeRequest;
     let secret = my_kx.shared_secret(host_kx_public);
@@ -333,6 +334,17 @@ pub async fn relay_compute(
         accepts_bf16,
         encrypted_position_ids: Vec::new(),
         encrypted_encoder_memory: Vec::new(),
+        patch_offset: patch.map(|p| p.offset).unwrap_or(0),
+        patch_sequence: patch.map(|p| p.sequence).unwrap_or(0),
+        branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
+        layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
+        encrypted_arguments: match patch {
+            Some(p) if !p.arguments.is_empty() => diffuse_trust::transport::encrypt(
+                &secret,
+                &crate::compute::arguments_to_bytes(&p.arguments),
+            )?,
+            _ => Vec::new(),
+        },
     };
 
     let response = match relay

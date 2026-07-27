@@ -23,6 +23,11 @@ message ComputeRequest {
   bool accepts_bf16 = 9;
   bytes encrypted_position_ids = 10;
   bytes encrypted_encoder_memory = 11;
+  uint64 patch_offset = 12;
+  uint64 patch_sequence = 13;
+  string branch = 14;
+  string layout = 15;
+  bytes encrypted_arguments = 16;
 }
 
 message ComputeResponse {

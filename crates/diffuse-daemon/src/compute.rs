@@ -15,6 +15,46 @@ use pb::compute_client::ComputeClient;
 use pb::compute_server::Compute;
 use pb::{ComputeRequest, ComputeResponse, ClearSessionRequest, ClearSessionResponse};
 
+#[derive(Clone, Default)]
+pub struct Patch {
+    pub offset: u64,
+    pub sequence: u64,
+    pub branch: String,
+    pub layout: String,
+    pub arguments: Vec<(u32, Tensor)>,
+}
+
+pub fn arguments_to_bytes(arguments: &[(u32, Tensor)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(arguments.len() as u32).to_le_bytes());
+    for (index, tensor) in arguments {
+        buf.extend_from_slice(&index.to_le_bytes());
+        let body = tensor_to_bytes(tensor);
+        buf.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&body);
+    }
+    buf
+}
+
+pub fn bytes_to_arguments(bytes: &[u8]) -> anyhow::Result<Vec<(u32, Tensor)>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    let count = u32::from_le_bytes(bytes[off..off + 4].try_into()?) as usize;
+    off += 4;
+    for _ in 0..count {
+        let index = u32::from_le_bytes(bytes[off..off + 4].try_into()?);
+        off += 4;
+        let len = u64::from_le_bytes(bytes[off..off + 8].try_into()?) as usize;
+        off += 8;
+        out.push((index, bytes_to_tensor(&bytes[off..off + len])?));
+        off += len;
+    }
+    Ok(out)
+}
+
 fn tensor_to_bytes(t: &Tensor) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(t.shape.len() as u32).to_le_bytes());
@@ -188,6 +228,7 @@ pub async fn request_slice(
     accepts_bf16: bool,
     position_ids: Option<&Tensor>,
     encoder_memory: Option<&Tensor>,
+    patch: Option<&Patch>,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -199,6 +240,12 @@ pub async fn request_slice(
     let encrypted_encoder_memory = match encoder_memory {
         Some(m) => encrypt(&secret, &tensor_to_bytes(m))?,
         None => Vec::new(),
+    };
+    let encrypted_arguments = match patch {
+        Some(p) if !p.arguments.is_empty() => {
+            encrypt(&secret, &arguments_to_bytes(&p.arguments))?
+        }
+        _ => Vec::new(),
     };
     let response = client
         .run_slice(ComputeRequest {
@@ -213,6 +260,11 @@ pub async fn request_slice(
             accepts_bf16,
             encrypted_position_ids,
             encrypted_encoder_memory,
+            patch_offset: patch.map(|p| p.offset).unwrap_or(0),
+            patch_sequence: patch.map(|p| p.sequence).unwrap_or(0),
+            branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
+            layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
+            encrypted_arguments,
         })
         .await?
         .into_inner();
@@ -238,6 +290,7 @@ pub async fn request_slice_chained(
     accepts_bf16: bool,
     position_ids: Option<&Tensor>,
     encoder_memory: Option<&Tensor>,
+    patch: Option<&Patch>,
 ) -> anyhow::Result<(Tensor, u64, u32)> {
     let secret = my_kx.shared_secret(host_kx_public);
     let plain = tensor_to_bytes(activations);
@@ -249,6 +302,12 @@ pub async fn request_slice_chained(
     let encrypted_encoder_memory = match encoder_memory {
         Some(m) => encrypt(&secret, &tensor_to_bytes(m))?,
         None => Vec::new(),
+    };
+    let encrypted_arguments = match patch {
+        Some(p) if !p.arguments.is_empty() => {
+            encrypt(&secret, &arguments_to_bytes(&p.arguments))?
+        }
+        _ => Vec::new(),
     };
     let response = client
         .run_slice(ComputeRequest {
@@ -263,6 +322,11 @@ pub async fn request_slice_chained(
             accepts_bf16,
             encrypted_position_ids,
             encrypted_encoder_memory,
+            patch_offset: patch.map(|p| p.offset).unwrap_or(0),
+            patch_sequence: patch.map(|p| p.sequence).unwrap_or(0),
+            branch: patch.map(|p| p.branch.clone()).unwrap_or_default(),
+            layout: patch.map(|p| p.layout.clone()).unwrap_or_default(),
+            encrypted_arguments,
         })
         .await?
         .into_inner();
@@ -300,6 +364,27 @@ pub fn spawn_compute_server(
     })
 }
 
+pub fn decode_patch(
+    secret: &[u8; 32],
+    req: &ComputeRequest,
+) -> anyhow::Result<Option<Patch>> {
+    if req.patch_sequence == 0 {
+        return Ok(None);
+    }
+    let arguments = if req.encrypted_arguments.is_empty() {
+        Vec::new()
+    } else {
+        bytes_to_arguments(&decrypt(secret, &req.encrypted_arguments)?)?
+    };
+    Ok(Some(Patch {
+        offset: req.patch_offset,
+        sequence: req.patch_sequence,
+        branch: req.branch.clone(),
+        layout: req.layout.clone(),
+        arguments,
+    }))
+}
+
 pub async fn process_compute_request(
     identity_kx: &KeyExchange,
     worker: &Arc<Mutex<WorkerHandle>>,
@@ -315,6 +400,7 @@ pub async fn process_compute_request(
     let tensor = bytes_to_tensor(&plain)?;
     let positions = decode_positions(&secret, &req.encrypted_position_ids)?;
     let memory = decode_positions(&secret, &req.encrypted_encoder_memory)?;
+    let patch = decode_patch(&secret, req)?;
     let compute_start = std::time::Instant::now();
     let out = {
         let mut w = worker.lock().await.clone();
@@ -330,6 +416,7 @@ pub async fn process_compute_request(
             req.accepts_bf16,
             positions,
             memory,
+            patch,
         )
         .await?
     };
@@ -361,6 +448,7 @@ pub async fn process_chained_request(
     let tensor = bytes_to_tensor(&plain)?;
     let positions = decode_positions(&secret, &req.encrypted_position_ids)?;
     let memory = decode_positions(&secret, &req.encrypted_encoder_memory)?;
+    let patch = decode_patch(&secret, req)?;
 
     let compute_start = std::time::Instant::now();
     let out = {
@@ -377,6 +465,7 @@ pub async fn process_chained_request(
             req.accepts_bf16,
             positions.clone(),
             memory.clone(),
+            patch.clone(),
         )
         .await?
     };
@@ -399,6 +488,16 @@ pub async fn process_chained_request(
         })?;
         let downstream = client
             .run_slice(ComputeRequest {
+                patch_offset: req.patch_offset,
+                patch_sequence: req.patch_sequence,
+                branch: req.branch.clone(),
+                layout: req.layout.clone(),
+                encrypted_arguments: match &patch {
+                    Some(p) if !p.arguments.is_empty() => {
+                        encrypt(&next_secret, &arguments_to_bytes(&p.arguments))?
+                    }
+                    _ => Vec::new(),
+                },
                 requester_kx_public: identity_kx.public_bytes().to_vec(),
                 model_id: req.model_id.clone(),
                 start_layer: next.start_layer,

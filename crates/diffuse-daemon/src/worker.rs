@@ -72,6 +72,7 @@ impl WorkerHandle {
         accepts_bf16: bool,
         position_ids: Option<Tensor>,
         encoder_memory: Option<Tensor>,
+        patch: Option<crate::compute::Patch>,
     ) -> anyhow::Result<Tensor> {
         let request = tonic::Request::new(SliceRequest {
             model_id: model_id.to_string(),
@@ -85,6 +86,22 @@ impl WorkerHandle {
             accepts_bf16,
             position_ids,
             encoder_memory,
+            patch_offset: patch.as_ref().map(|p| p.offset).unwrap_or(0),
+            patch_sequence: patch.as_ref().map(|p| p.sequence).unwrap_or(0),
+            branch: patch.as_ref().map(|p| p.branch.clone()).unwrap_or_default(),
+            layout: patch.as_ref().map(|p| p.layout.clone()).unwrap_or_default(),
+            arguments: patch
+                .as_ref()
+                .map(|p| {
+                    p.arguments
+                        .iter()
+                        .map(|(index, value)| pb::DiffusionArgument {
+                            index: *index,
+                            value: Some(value.clone()),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
         let response = self.client.run_slice(request).await?.into_inner();
         if !response.ok {
@@ -93,6 +110,115 @@ impl WorkerHandle {
         response
             .activations
             .ok_or_else(|| anyhow::anyhow!("worker returned no activations"))
+    }
+
+    pub async fn begin_diffusion(
+        &mut self,
+        session_id: &str,
+        model_id: &str,
+        prompt: &str,
+        steps: u32,
+        height: u32,
+        width: u32,
+        frames: u32,
+        guidance: f32,
+        seed: u64,
+    ) -> anyhow::Result<(Tensor, crate::compute::Patch, u64, u32, String)> {
+        let response = self
+            .client
+            .begin_diffusion(tonic::Request::new(pb::BeginDiffusionRequest {
+                session_id: session_id.to_string(),
+                model_id: model_id.to_string(),
+                prompt: prompt.to_string(),
+                steps,
+                height,
+                width,
+                frames,
+                guidance,
+                accepts_bf16: false,
+                seed,
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("could not start the diffusion: {}", response.error);
+        }
+        let hidden = response
+            .hidden
+            .ok_or_else(|| anyhow::anyhow!("no first hidden states"))?;
+        let patch = crate::compute::Patch {
+            offset: 0,
+            sequence: response.sequence,
+            branch: response.branch,
+            layout: response.layout,
+            arguments: response
+                .arguments
+                .into_iter()
+                .filter_map(|a| a.value.map(|v| (a.index, v)))
+                .collect(),
+        };
+        Ok((
+            hidden,
+            patch,
+            response.sequence,
+            response.blocks,
+            response.output_kind,
+        ))
+    }
+
+    pub async fn advance_diffusion(
+        &mut self,
+        session_id: &str,
+        hidden: Tensor,
+    ) -> anyhow::Result<Option<(Tensor, crate::compute::Patch)>> {
+        let response = self
+            .client
+            .advance_diffusion(tonic::Request::new(pb::AdvanceDiffusionRequest {
+                session_id: session_id.to_string(),
+                hidden: Some(hidden),
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("the diffusion stalled: {}", response.error);
+        }
+        if response.finished {
+            return Ok(None);
+        }
+        let next = response
+            .hidden
+            .ok_or_else(|| anyhow::anyhow!("no hidden states for the next step"))?;
+        Ok(Some((
+            next,
+            crate::compute::Patch {
+                offset: 0,
+                sequence: response.sequence,
+                branch: response.branch,
+                layout: response.layout,
+                arguments: response
+                    .arguments
+                    .into_iter()
+                    .filter_map(|a| a.value.map(|v| (a.index, v)))
+                    .collect(),
+            },
+        )))
+    }
+
+    pub async fn finish_diffusion(
+        &mut self,
+        session_id: &str,
+    ) -> anyhow::Result<(Vec<u8>, String)> {
+        let response = self
+            .client
+            .finish_diffusion(tonic::Request::new(pb::FinishDiffusionRequest {
+                session_id: session_id.to_string(),
+            }))
+            .await?
+            .into_inner();
+        if !response.ok {
+            anyhow::bail!("could not assemble the answer: {}", response.error);
+        }
+        Ok((response.data, response.mime))
     }
 
     pub async fn encode(&mut self, text: &str, chat_template: bool) -> anyhow::Result<(Vec<i64>, i64)> {

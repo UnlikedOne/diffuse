@@ -84,6 +84,7 @@ async fn health_sweep_detects_death_proactively() {
     let b1 = connect_loaded(w_b1.endpoint(), mid, full).await;
 
     let mut orch = Orchestrator {
+        patch: None,
         model_id: MODEL.to_string(),
         stages: vec![
             Stage {

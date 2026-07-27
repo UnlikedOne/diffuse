@@ -20,6 +20,16 @@ message SliceRequest {
   bool accepts_bf16 = 9;
   Tensor position_ids = 10;
   Tensor encoder_memory = 11;
+  uint64 patch_offset = 12;
+  uint64 patch_sequence = 13;
+  repeated DiffusionArgument arguments = 14;
+  string branch = 15;
+  string layout = 16;
+}
+
+message DiffusionArgument {
+  uint32 index = 1;
+  Tensor value = 2;
 }
 
 message SliceResponse {
@@ -194,6 +204,58 @@ message FinishGenerationResponse {
   string text = 5;
 }
 
+message BeginDiffusionRequest {
+  string session_id = 1;
+  string model_id = 2;
+  string prompt = 3;
+  uint32 steps = 4;
+  uint32 height = 5;
+  uint32 width = 6;
+  uint32 frames = 7;
+  float guidance = 8;
+  bool accepts_bf16 = 9;
+  uint64 seed = 10;
+}
+
+message BeginDiffusionResponse {
+  bool ok = 1;
+  string error = 2;
+  Tensor hidden = 3;
+  repeated DiffusionArgument arguments = 4;
+  string layout = 5;
+  uint64 sequence = 6;
+  uint32 blocks = 7;
+  string output_kind = 8;
+  string branch = 9;
+}
+
+message AdvanceDiffusionRequest {
+  string session_id = 1;
+  Tensor hidden = 2;
+}
+
+message AdvanceDiffusionResponse {
+  bool ok = 1;
+  string error = 2;
+  bool finished = 3;
+  Tensor hidden = 4;
+  repeated DiffusionArgument arguments = 5;
+  string layout = 6;
+  uint64 sequence = 7;
+  string branch = 8;
+}
+
+message FinishDiffusionRequest {
+  string session_id = 1;
+}
+
+message FinishDiffusionResponse {
+  bool ok = 1;
+  string error = 2;
+  bytes data = 3;
+  string mime = 4;
+}
+
 message ClearSessionRequest {
   string session_id = 1;
 }
@@ -215,4 +277,7 @@ service InferenceWorker {
   rpc BeginGeneration(BeginGenerationRequest) returns (BeginGenerationResponse);
   rpc AdvanceGeneration(AdvanceGenerationRequest) returns (AdvanceGenerationResponse);
   rpc FinishGeneration(FinishGenerationRequest) returns (FinishGenerationResponse);
+  rpc BeginDiffusion(BeginDiffusionRequest) returns (BeginDiffusionResponse);
+  rpc AdvanceDiffusion(AdvanceDiffusionRequest) returns (AdvanceDiffusionResponse);
+  rpc FinishDiffusion(FinishDiffusionRequest) returns (FinishDiffusionResponse);
 }

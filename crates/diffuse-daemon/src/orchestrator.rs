@@ -97,6 +97,7 @@ pub struct Orchestrator {
     pub session_prefill: Option<Tensor>,
     /// Multi-axis positions belonging to that prefill, replayed with it.
     pub session_positions: Option<Tensor>,
+    pub patch: Option<crate::compute::Patch>,
 }
 
 pub const DECODE_TOP_K: u32 = 8;
@@ -161,6 +162,7 @@ impl Stage {
         accepts_bf16: bool,
         position_ids: Option<&Tensor>,
         encoder_memory: Option<&Tensor>,
+        patch: Option<&crate::compute::Patch>,
     ) -> anyhow::Result<Tensor> {
         let start = self.start_layer;
         let end = self.end_layer;
@@ -179,6 +181,7 @@ impl Stage {
                         .run_slice(
                             model_id, start, end, session_id, 0, input.clone(), use_cache, top_k,
                             accepts_bf16, position_ids.cloned(), encoder_memory.cloned(),
+                            patch.cloned(),
                         )
                         .await
                         .map(|t| {
@@ -210,6 +213,7 @@ impl Stage {
                                 accepts_bf16,
                                 position_ids,
                                 encoder_memory,
+                                patch,
                             )
                             .await
                         }
@@ -219,7 +223,7 @@ impl Stage {
                                     let r = request_slice(
                                         &mut c, host_kx_public, session_kx, model_id,
                                         start, end, session_id, &input, top_k, accepts_bf16,
-                                        position_ids, encoder_memory,
+                                        position_ids, encoder_memory, patch,
                                     )
                                     .await;
                                     *client = Some(c);
@@ -250,6 +254,7 @@ impl Stage {
                         &input,
                         top_k,
                         accepts_bf16,
+                        patch,
                     )
                     .await
                 }
@@ -478,6 +483,7 @@ impl Orchestrator {
             return Ok(None);
         };
 
+        let patch_for_chain = self.patch.clone();
         let outcome = crate::compute::request_slice_chained(
             head_client,
             &head_kx,
@@ -492,6 +498,7 @@ impl Orchestrator {
             head_accepts_bf16,
             position_ids,
             encoder_memory,
+            patch_for_chain.as_ref(),
         )
         .await;
 
@@ -570,7 +577,7 @@ impl Orchestrator {
         position_ids: Option<Tensor>,
         encoder_memory: Option<Tensor>,
     ) -> anyhow::Result<Tensor> {
-        if self.chain_enabled && use_cache {
+        if self.chain_enabled && (use_cache || self.patch.is_some()) {
             match self
                 .forward_chained(
                     &input,
@@ -603,6 +610,7 @@ impl Orchestrator {
         let mut t = input;
         let mut compute_sum = 0u64;
         let mut network_sum = 0u64;
+        let patch = self.patch.clone();
         for (idx, stage) in self.stages.iter_mut().enumerate() {
             let stage_top_k = if idx == last_stage { top_k } else { 0 };
             t = stage
@@ -616,6 +624,7 @@ impl Orchestrator {
                     consumer_accepts[idx],
                     position_ids.as_ref(),
                     encoder_memory.as_ref(),
+                    patch.as_ref(),
                 )
                 .await?;
             compute_sum += stage.last_compute_ms;
@@ -624,6 +633,18 @@ impl Orchestrator {
         self.last_forward_compute_ms = compute_sum;
         self.last_forward_network_ms = network_sum;
         Ok(t)
+    }
+
+    pub async fn denoise_patch(
+        &mut self,
+        hidden: Tensor,
+        patch: crate::compute::Patch,
+        session_id: &str,
+    ) -> anyhow::Result<Tensor> {
+        self.patch = Some(patch);
+        let out = self.forward_tensor(hidden, session_id, false, 0).await;
+        self.patch = None;
+        out
     }
 
     async fn forward_step(
@@ -1016,6 +1037,7 @@ pub async fn build_from_registry(
         });
     }
     Ok(Orchestrator {
+        patch: None,
         model_id: model_id.to_string(),
         stages,
         spare_endpoints,

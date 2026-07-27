@@ -53,6 +53,7 @@ pub async fn run_demo(
     );
 
     let orch = Orchestrator {
+        patch: None,
         model_id: model.clone(),
         stages: vec![stage_a, stage_b],
         spare_endpoints: spares,

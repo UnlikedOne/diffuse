@@ -55,6 +55,7 @@ impl ClientSession {
                 false,
                 None,
                 None,
+                None,
             )
             .await?;
 
@@ -74,6 +75,7 @@ impl ClientSession {
             &local_activations,
             0,
             false,
+            None,
             None,
             None,
         )

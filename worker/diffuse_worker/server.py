@@ -1,4 +1,5 @@
 import logging
+import threading
 from concurrent import futures
 
 import grpc
@@ -8,11 +9,27 @@ import torch
 from diffuse_worker import data_pb2, data_pb2_grpc
 from diffuse_worker.batching import BatchScheduler
 from diffuse_worker.config import WorkerConfig
+from diffuse_worker.diffusion import (
+    DiffusionSession,
+    DiffusionStack,
+    changed_arguments,
+    flatten_arguments,
+    read_index,
+    rebuild_arguments,
+)
 from diffuse_worker.generation import GenerationSession, SessionStore
 from diffuse_worker.inference import MediaEmbedder, SliceRunner
 from diffuse_worker.slicing import ModelSlice
 
 logging.basicConfig(level=logging.INFO)
+def _branch_of(values):
+    for value in values:
+        if value.dim() >= 2 and value.shape[1] > 1:
+            flat = value.reshape(-1)[:64].to(torch.float32)
+            return f"{tuple(value.shape)}:{float(flat.sum()):.6e}"
+    return "single"
+
+
 log = logging.getLogger("diffuse.worker")
 
 MAX_MESSAGE_BYTES = 128 * 1024 * 1024
@@ -92,8 +109,32 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         self.scheduler: BatchScheduler | None = None
         self.sessions = SessionStore()
         self.loaded = False
+        self.stack = None
+        self.patch_state = {}
+        self.diffusions = {}
+        self._diffusion_lock = threading.Lock()
 
     def LoadSlice(self, request, context):
+        token = request.hf_token or self.config.hf_token or None
+        try:
+            if read_index(request.model_id, token) is not None:
+                stack = DiffusionStack(device=self.config.device)
+                total = stack.load(
+                    request.model_id, request.start_layer, request.end_layer, token
+                )
+                self.stack = stack
+                self.loaded = True
+                log.info(
+                    "loaded diffusion blocks %d:%d of %d for %s",
+                    request.start_layer,
+                    request.end_layer,
+                    total,
+                    request.model_id,
+                )
+                return data_pb2.LoadSliceResponse(ok=True, total_layers=total)
+        except Exception as exc:
+            log.exception("diffusion load failed")
+            return data_pb2.LoadSliceResponse(ok=False, error=str(exc))
         try:
             info = self.slice.load(
                 model_id=request.model_id,
@@ -122,6 +163,8 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             return data_pb2.LoadSliceResponse(ok=False, error=str(exc))
 
     def RunSlice(self, request, context):
+        if request.patch_sequence:
+            return self._run_patch(request)
         if not self.loaded or self.runner is None:
             return data_pb2.SliceResponse(
                 session_id=request.session_id, ok=False, error="slice not loaded"
@@ -434,6 +477,40 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 return processor(audio[0], sampling_rate=rate, return_tensors="pt")
             return processor(request.text, return_tensors="pt")
 
+    def _run_patch(self, request):
+        if self.stack is None:
+            return data_pb2.SliceResponse(
+                session_id=request.session_id, ok=False, error="no diffusion blocks loaded"
+            )
+        try:
+            key = f"{request.session_id}:{request.branch}"
+            with self._diffusion_lock:
+                state = self.patch_state.setdefault(key, {"values": {}, "layout": ""})
+                for item in request.arguments:
+                    state["values"][item.index] = proto_to_tensor(item.value)
+                if request.layout:
+                    state["layout"] = request.layout
+                values = [state["values"][i] for i in sorted(state["values"])]
+                layout = state["layout"]
+            arguments = rebuild_arguments(values, layout) if layout else tuple(values)
+            out = self.stack.run_patch(
+                key,
+                proto_to_tensor(request.activations),
+                int(request.patch_offset),
+                int(request.patch_sequence),
+                arguments,
+            )
+            return data_pb2.SliceResponse(
+                session_id=request.session_id,
+                ok=True,
+                activations=tensor_to_proto(out, accepts_bf16=request.accepts_bf16),
+            )
+        except Exception as exc:
+            log.exception("diffusion patch failed")
+            return data_pb2.SliceResponse(
+                session_id=request.session_id, ok=False, error=str(exc)
+            )
+
     def _prompt_with_placeholders(self, processor, request) -> str:
         """The prompt with one placeholder per attachment, when the model uses them.
 
@@ -481,6 +558,105 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
         except Exception as exc:
             log.exception("finish generation failed")
             return data_pb2.FinishGenerationResponse(ok=False, error=str(exc))
+
+    def _diffusion_step(self, session, item, first):
+        if item is None:
+            return None
+        hidden, arguments = item
+        values, layout = flatten_arguments(arguments)
+        branch = _branch_of(values)
+        previous = session.branches.setdefault(branch, {})
+        fresh = changed_arguments(previous, values)
+        packed = [
+            data_pb2.DiffusionArgument(index=index, value=tensor_to_proto(value))
+            for index, value in sorted(fresh.items())
+        ]
+        return hidden, packed, layout if first or branch not in session.told else "", branch
+
+    def BeginDiffusion(self, request, context):
+        token = self.config.hf_token or None
+        try:
+            options = {}
+            if request.height:
+                options["height"] = int(request.height)
+            if request.width:
+                options["width"] = int(request.width)
+            if request.frames:
+                options["num_frames"] = int(request.frames)
+            if request.guidance:
+                options["guidance_scale"] = float(request.guidance)
+            session = DiffusionSession(
+                request.model_id,
+                request.prompt,
+                max(int(request.steps), 1),
+                token=token,
+                device=self.config.device,
+                options=options,
+                seed=int(request.seed) if request.seed else None,
+            )
+            session.load()
+            session.branches = {}
+            session.told = set()
+            kind = session.output_kind()
+            blocks = session.blocks
+            step = self._diffusion_step(session, session.begin(), True)
+            if step is None:
+                raise ValueError("the pipeline produced no transformer call")
+            hidden, packed, layout, branch = step
+            session.told.add(branch)
+            with self._diffusion_lock:
+                self.diffusions[request.session_id] = session
+            return data_pb2.BeginDiffusionResponse(
+                ok=True,
+                hidden=tensor_to_proto(hidden, accepts_bf16=request.accepts_bf16),
+                arguments=packed,
+                layout=layout,
+                sequence=hidden.shape[1],
+                blocks=blocks,
+                output_kind=kind,
+                branch=branch,
+            )
+        except Exception as exc:
+            log.exception("begin diffusion failed")
+            return data_pb2.BeginDiffusionResponse(ok=False, error=str(exc))
+
+    def AdvanceDiffusion(self, request, context):
+        with self._diffusion_lock:
+            session = self.diffusions.get(request.session_id)
+        if session is None:
+            return data_pb2.AdvanceDiffusionResponse(ok=False, error="unknown session")
+        try:
+            step = self._diffusion_step(
+                session, session.advance(proto_to_tensor(request.hidden)), False
+            )
+            if step is None:
+                return data_pb2.AdvanceDiffusionResponse(ok=True, finished=True)
+            hidden, packed, layout, branch = step
+            session.told.add(branch)
+            return data_pb2.AdvanceDiffusionResponse(
+                ok=True,
+                finished=False,
+                hidden=tensor_to_proto(hidden),
+                arguments=packed,
+                layout=layout,
+                sequence=hidden.shape[1],
+                branch=branch,
+            )
+        except Exception as exc:
+            log.exception("advance diffusion failed")
+            return data_pb2.AdvanceDiffusionResponse(ok=False, error=str(exc))
+
+    def FinishDiffusion(self, request, context):
+        with self._diffusion_lock:
+            session = self.diffusions.pop(request.session_id, None)
+        if session is None:
+            return data_pb2.FinishDiffusionResponse(ok=False, error="unknown session")
+        try:
+            data, mime = session.finish()
+            return data_pb2.FinishDiffusionResponse(ok=True, data=data, mime=mime)
+        except Exception as exc:
+            log.exception("finish diffusion failed")
+            return data_pb2.FinishDiffusionResponse(ok=False, error=str(exc))
 
     def SearchModels(self, request, context):
         try:

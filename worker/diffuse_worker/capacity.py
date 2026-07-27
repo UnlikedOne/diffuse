@@ -11,6 +11,7 @@ _DTYPE_BYTES = {
     "F8_E4M3": 1, "F8_E5M2": 1,
 }
 
+_BLOCK_RE = re.compile(r"(?:^|\.)(?:blocks|transformer_blocks|single_transformer_blocks)\.(\d+)\.")
 _LAYER_RE = re.compile(r"\.(?:layers|h|blocks|block|decoder\.layers)\.(\d+)\.")
 
 
@@ -21,7 +22,54 @@ def _normalize_dtype(d: str) -> str:
     }.get(d.lower(), "BF16")
 
 
+def _profile_diffusion(model_id, config, load_dtype, per):
+    import glob
+    import os
+
+    from safetensors import safe_open
+
+    from diffuse_worker.diffusion import DiffusionStack, block_count
+
+    total = block_count(config) or 0
+    files = DiffusionStack._weight_files(model_id, None)
+    per_block = {}
+    other = 0
+    for path in files:
+        with safe_open(path, framework="pt") as handle:
+            for name in handle.keys():
+                shape = handle.get_slice(name).get_shape()
+                size = 1
+                for dim in shape:
+                    size *= dim
+                size *= per
+                match = _BLOCK_RE.search(name)
+                if match:
+                    index = int(match.group(1))
+                    per_block[index] = per_block.get(index, 0) + size
+                else:
+                    other += size
+    sizes = [per_block.get(i, 0) for i in range(total)]
+    average = (sum(sizes) // total) if total else 0
+    return {
+        "model_id": model_id,
+        "load_dtype": load_dtype,
+        "total_layers": total,
+        "layer_sizes_bytes": sizes,
+        "avg_layer_bytes": average,
+        "non_layer_bytes": other,
+        "total_bytes": sum(sizes) + other,
+    }
+
+
 def profile_model(model_id: str, load_dtype: str = "bfloat16", hf_token: str | None = None) -> dict:
+    from diffuse_worker.diffusion import transformer_config
+
+    config = transformer_config(model_id, hf_token)
+    if config is not None:
+        return _profile_diffusion(
+            model_id, config, load_dtype, _DTYPE_BYTES.get(_normalize_dtype(load_dtype), 2)
+        )
+
     meta = get_safetensors_metadata(model_id, token=hf_token)
     per = _DTYPE_BYTES.get(_normalize_dtype(load_dtype), 2)
 

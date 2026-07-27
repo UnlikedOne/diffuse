@@ -87,6 +87,7 @@ async fn network_self_heals_after_replica_death() {
     let b2 = connect_loaded(w_b2.endpoint(), mid, full).await;
 
     let mut orch = Orchestrator {
+        patch: None,
         model_id: MODEL.to_string(),
         stages: vec![
             Stage {

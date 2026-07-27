@@ -106,6 +106,7 @@ async fn generation_survives_dead_replica() {
     };
 
     let mut orch = Orchestrator {
+        patch: None,
         model_id: MODEL.to_string(),
         stages: vec![stage_a, stage_b],
         spare_endpoints: vec![],

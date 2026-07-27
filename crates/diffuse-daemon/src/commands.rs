@@ -7,6 +7,7 @@ use crate::capacity::{analyze, assign_slice, ModelCapacity};
 use crate::discovery::bootstrap;
 use crate::identity::Identity;
 use crate::registry::PeerRegistry;
+use crate::worker::pb::Tensor;
 use crate::worker::WorkerHandle;
 use tokio::sync::Mutex;
 use crate::gossip::spawn_gossip_server;
@@ -130,6 +131,130 @@ async fn run_generative(
         mime,
         path.display()
     ))
+}
+
+async fn run_diffusion(
+    orch: &mut crate::orchestrator::Orchestrator,
+    worker: &mut WorkerHandle,
+    session_id: &str,
+    started: (Tensor, crate::compute::Patch, u64, u32, String),
+    patches: usize,
+) -> anyhow::Result<String> {
+    let (mut hidden, mut patch, mut sequence, blocks, kind) = started;
+
+    println!(
+        "  {} this model answers with {} by diffusion",
+        "→".bright_blue(),
+        kind.bright_white()
+    );
+    println!(
+        "  {} {} blocks, cut into {} patch{} per step",
+        "→".bright_blue(),
+        blocks.to_string().bright_white(),
+        patches.to_string().bright_white(),
+        if patches > 1 { "es" } else { "" }
+    );
+    println!("  {} generating over encrypted channel...", "→".bright_blue());
+    println!();
+
+    let started = std::time::Instant::now();
+    let mut calls = 0usize;
+    let bar = start_spinner("denoising");
+    loop {
+        let count = if calls == 0 { 1 } else { patches };
+        let size = (sequence as usize).div_ceil(count.max(1));
+        let mut pieces: Vec<Tensor> = Vec::with_capacity(count);
+        let mut carried = std::mem::take(&mut patch.arguments);
+        let layout = std::mem::take(&mut patch.layout);
+        for index in 0..count {
+            let start = index * size;
+            let stop = ((index + 1) * size).min(sequence as usize);
+            if start >= stop {
+                continue;
+            }
+            let mut step = patch.clone();
+            step.offset = start as u64;
+            step.arguments = std::mem::take(&mut carried);
+            step.layout = if index == 0 { layout.clone() } else { String::new() };
+            let slice = slice_rows(&hidden, start, stop)?;
+            pieces.push(orch.denoise_patch(slice, step, session_id).await?);
+        }
+        let joined = join_rows(&pieces, &hidden)?;
+        calls += 1;
+        match worker.advance_diffusion(session_id, joined).await? {
+            Some((next, next_patch)) => {
+                hidden = next;
+                sequence = next_patch.sequence;
+                patch = next_patch;
+            }
+            None => break,
+        }
+    }
+    bar.finish_and_clear();
+    orch.clear_session(session_id).await;
+
+    let (data, mime) = worker.finish_diffusion(session_id).await?;
+    let extension = mime.rsplit('/').next().unwrap_or("bin");
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(format!("diffuse-{}.{}", &session_id[..8.min(session_id.len())], extension));
+    std::fs::write(&path, &data)?;
+    println!("  {}", "answer:".bright_green().bold());
+    println!(
+        "  {} of {} after {} transformer passes in {:.1}s",
+        human_bytes(data.len() as u64).bright_white(),
+        mime.bright_white(),
+        calls.to_string().bright_white(),
+        started.elapsed().as_secs_f64()
+    );
+    println!("  {}", path.display().to_string().bright_green().bold());
+    println!();
+    Ok(format!(
+        "{} of {} written to {}",
+        human_bytes(data.len() as u64),
+        mime,
+        path.display()
+    ))
+}
+
+fn slice_rows(tensor: &Tensor, start: usize, stop: usize) -> anyhow::Result<Tensor> {
+    if tensor.shape.len() != 3 {
+        anyhow::bail!("expected [batch, sequence, width] hidden states");
+    }
+    let width = tensor.shape[2] as usize;
+    let unit = element_size(&tensor.dtype)?;
+    let row = width * unit;
+    Ok(Tensor {
+        shape: vec![tensor.shape[0], (stop - start) as i64, tensor.shape[2]],
+        dtype: tensor.dtype.clone(),
+        data: tensor.data[start * row..stop * row].to_vec(),
+    })
+}
+
+fn join_rows(pieces: &[Tensor], like: &Tensor) -> anyhow::Result<Tensor> {
+    let mut data = Vec::with_capacity(like.data.len());
+    let mut rows = 0i64;
+    for piece in pieces {
+        data.extend_from_slice(&piece.data);
+        rows += piece.shape[1];
+    }
+    Ok(Tensor {
+        shape: vec![like.shape[0], rows, like.shape[2]],
+        dtype: pieces
+            .first()
+            .map(|p| p.dtype.clone())
+            .unwrap_or_else(|| like.dtype.clone()),
+        data,
+    })
+}
+
+fn element_size(dtype: &str) -> anyhow::Result<usize> {
+    match dtype {
+        "float32" | "int32" => Ok(4),
+        "float16" | "bfloat16" => Ok(2),
+        "int64" | "float64" => Ok(8),
+        other => anyhow::bail!("unsupported dtype {}", other),
+    }
 }
 
 pub async fn plan(
@@ -644,12 +769,16 @@ pub fn collect_attachments(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn query(
     model: &str,
     prompt: &str,
     attachments: Vec<Attachment>,
     bootstrap_sentinels: &[String],
     max_tokens: usize,
+    steps: usize,
+    patches: usize,
+    seed: u64,
     identity: Identity,
 ) -> anyhow::Result<()> {
     crate::tui::header(crate::tui::sym("🔮", ">"), "query");
@@ -703,6 +832,17 @@ pub async fn query(
     };
 
     let session_id = format!("query-{}", uuid::Uuid::new_v4());
+
+    match tokenizer_worker
+        .begin_diffusion(&session_id, model, prompt, steps as u32, 0, 0, 0, 0.0, seed)
+        .await
+    {
+        Ok(started) => {
+            run_diffusion(&mut orch, &mut tokenizer_worker, &session_id, started, patches).await?;
+            return Ok(());
+        }
+        Err(e) => tracing::debug!("not a diffusion pipeline: {:#}", e),
+    }
 
     // Ask the local worker what this model answers with. A model that returns
     // audio or pixels is driven differently from one that returns words.
