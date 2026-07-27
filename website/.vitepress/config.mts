@@ -61,6 +61,7 @@ export default defineConfig({
         items: [
           { text: 'Slices and the pipeline', link: '/concepts/pipeline' },
           { text: 'What Diffuse can run', link: '/concepts/model-support' },
+          { text: 'Diffusion across nodes', link: '/concepts/diffusion' },
           { text: 'How the network is made fast', link: '/concepts/performance' },
           { text: 'Gossip and discovery', link: '/concepts/gossip' },
           { text: 'Replication and healing', link: '/concepts/replication' },

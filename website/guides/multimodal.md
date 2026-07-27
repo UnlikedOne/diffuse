@@ -139,15 +139,20 @@ normal case.
 | `mistralai/Voxtral-Mini-*` | text, audio | text | yes |
 | `openai/whisper-*` | audio | text | yes |
 | `facebook/musicgen-*` | text | **audio** | yes |
+| Wan, CogVideoX and other diffusion pipelines | text | **video** | yes |
 
 Every row was run end to end and compared against the same model running whole
 on one machine. Where the comparison is exact, it is noted in
 [model support](/concepts/model-support).
 
-Image generation is not verified. The mechanism is the same as audio — a model
-that emits image tokens, and a decoder on your machine that turns them into
-pixels — but no such model small enough to test has been run. Do not assume it
-works until it appears in this table.
+Video by diffusion goes a different route from everything else in this table:
+the picture is cut into patches rather than the answer into tokens. It is
+explained in [diffusion across nodes](/concepts/diffusion), and it is the same
+route an image or audio diffusion model takes.
+
+Image generation by *token* prediction — a model that emits image tokens the way
+MusicGen emits audio codes — is not verified. No such model small enough to test
+has been run. Do not assume it works until it appears in this table.
 
 ## Getting the extras
 

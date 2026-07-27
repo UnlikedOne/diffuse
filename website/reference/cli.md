@@ -36,10 +36,16 @@ Ask one question, print the answer, exit.
 | `--media <path>` | none | any attachment; kind read from the extension |
 | `--bootstrap <urls>` | built-in sentinels | sentinels to discover the network |
 | `--max-tokens <n>` | 80 | maximum tokens to generate |
+| `--steps <n>` | 20 | denoising steps, for a model that answers by diffusion |
+| `--patches <n>` | 4 | pieces each denoising step is cut into across the nodes |
+| `--seed <n>` | 0 | same seed and prompt give the same answer |
 
 Attachments are consumed on your machine; only activations leave. When the model
 answers with something other than text, the file is written to the current
 directory and its path printed. See [images, audio and video](/guides/multimodal).
+
+`--steps`, `--patches` and `--seed` apply only to models that answer by
+diffusion; see [diffusion across nodes](/concepts/diffusion).
 
 ## `models`
 
@@ -83,15 +89,6 @@ Analyze this machine and show which slice it would host, without joining.
 | `--worker <url>` | `http://127.0.0.1:50051` | worker endpoint |
 | `--overhead <f>` | 0.3 | memory fraction held back as headroom |
 | `--bootstrap <urls>` | none | sentinels for a network view |
-
-## Environment variables
-
-| Variable | Meaning |
-|----------|---------|
-| `DIFFUSE_WORKER_DIR` | path to the Python worker (set by the installer) |
-| `DIFFUSE_WORKER_PORT` | port the worker binds |
-| `RUST_LOG` | log verbosity, for example `RUST_LOG=info` |
-
 
 ## Environment
 

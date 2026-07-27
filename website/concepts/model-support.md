@@ -26,11 +26,12 @@ it while it writes words. Supported. The encoder runs on your machine and its
 output travels once per session, held by each node the way the cache is.
 
 **Iterative refinement.** The whole stack runs twenty to fifty times to produce
-one result, with no cache carried between passes. This is modern image
-diffusion — Flux, SD3, PixArt. Their stacks *are* homogeneous transformers and
-would slice, but a picture costs fifty full traversals instead of one per
-token, which is only worth the network cost on GPU nodes. **Deferred by
-decision, not refused on principle.**
+one result, with no cache carried between passes. This is diffusion: Flux, SD3,
+PixArt for pictures, Wan and CogVideoX for video, Stable Audio for sound.
+Supported, but split a different way — see [diffusion across
+nodes](/concepts/diffusion). The stack is cut into stages as usual, and the
+picture is cut into patches so the stages have something to work on at the same
+time.
 
 ## What is refused, and why
 
@@ -105,6 +106,7 @@ one machine and then again split across slices, and comparing.
 | Voxtral | autoregressive + audio tower | correct transcript |
 | Whisper | encoder memory | identical transcript |
 | MusicGen | encoder memory + 4 output streams | identical codes, token for token |
+| Wan (video) | iterative refinement, patch-parallel | identical with one patch, 0.03/255 with sixteen |
 
 "Identical" means the sliced pipeline produced the same tokens as the same
 model running whole, not merely a plausible answer. That is the property
