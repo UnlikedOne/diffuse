@@ -304,8 +304,10 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
     def BeginGeneration(self, request, context):
         """Open a generation on this machine and say what it will produce."""
         if self.slice.model is None:
+            # A plain decoder needs nothing special: say so plainly rather than
+            # failing, so the caller takes the ordinary path without a warning.
             return data_pb2.BeginGenerationResponse(
-                ok=False, error="this slice holds no model endpoints for generation"
+                ok=True, streams=1, output_kind="text"
             )
         try:
             processor = self.slice.processor or self.slice.tokenizer
@@ -331,27 +333,59 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             return data_pb2.BeginGenerationResponse(ok=False, error=str(exc))
 
     def _build_inputs(self, processor, request):
+        """Hand the processor the media under the names it knows.
+
+        Introspection does not help here: a processor's __call__ is usually
+        (*args, **kwargs), so the natural names are passed and the sampling rate
+        always travels with audio, which is what decides whether a spectrogram
+        or a tokenizer is used."""
         import io
 
-        images, audio = [], []
+        images, audio, rate = [], [], 16000
         for item in request.media:
             if item.kind == "audio":
                 import soundfile
 
-                samples, _rate = soundfile.read(io.BytesIO(item.data))
+                samples, sample_rate = soundfile.read(io.BytesIO(item.data))
                 audio.append(samples)
+                rate = int(sample_rate)
+            elif item.kind == "video":
+                import tempfile
+
+                import imageio.v2 as iio
+                import numpy as np
+
+                suffix = "." + (item.mime.split("/")[-1] or "mp4")
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+                    fh.write(item.data)
+                    path = fh.name
+                try:
+                    images.extend(np.asarray(f) for f in iio.mimread(path, memtest=False))
+                finally:
+                    import os
+
+                    os.unlink(path)
             else:
                 from PIL import Image
 
                 images.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
-        kwargs = {"text": [request.text], "return_tensors": "pt"}
+
+        kwargs = {"return_tensors": "pt"}
+        if audio:
+            kwargs["audio"] = audio[0] if len(audio) == 1 else audio
+            kwargs["sampling_rate"] = rate
         if images:
             kwargs["images"] = images
-        if audio:
-            kwargs["audio"] = audio
+        if request.text or not kwargs.get("audio") is not None and not images:
+            kwargs["text"] = [request.text]
+        if "text" not in kwargs and not audio and not images:
+            kwargs["text"] = [request.text]
+
         try:
-            return processor(**kwargs, padding=True)
+            return processor(**kwargs)
         except TypeError:
+            if audio:
+                return processor(audio[0], sampling_rate=rate, return_tensors="pt")
             return processor(request.text, return_tensors="pt")
 
     def AdvanceGeneration(self, request, context):

@@ -30,9 +30,11 @@ _TOWER_MARKERS = (
     # belongs with the endpoints, never a stack to split. Naming it here also
     # keeps its blocks out of the layer count, since a T5 numbers them
     # `.block.N.` and would otherwise be measured as decoder layers.
-    "text_encoder",
-    "audio_encoder",
     "enc_to_dec_proj",
+    # Any encoder at all. An encoder-decoder can carry one exactly as deep as
+    # its decoder, and picking the wrong twelve layers would split the half
+    # that reads rather than the half that answers.
+    "encoder",
 )
 
 _TEXT_MODULE_NAMES = ("language_model", "text_model", "model", "transformer")
@@ -102,6 +104,10 @@ def needs_endpoints(cfg) -> bool:
     bytes, needs those pieces on the machine that owns the question, since that
     is where the media is consumed and where the answer is rebuilt."""
     if is_multimodal(cfg):
+        return True
+    # An encoder-decoder always needs its encoder run somewhere, and that
+    # somewhere is the machine that owns the prompt or the recording.
+    if getattr(cfg, "is_encoder_decoder", False):
         return True
     decoder = text_config(cfg)
     for name in dir(cfg):
@@ -471,6 +477,7 @@ class ModelSlice:
         self.tower = {}
         self.processor = None
         self.multimodal = False
+        self.wants_processor = False
         self.model = None
 
     def load(
@@ -486,6 +493,10 @@ class ModelSlice:
         if total is None:
             raise ValueError(f"cannot determine the layer count of {model_id}")
         self.multimodal = is_multimodal(cfg)
+        # A processor is needed by more than the multimodal ones: an
+        # encoder-decoder reads a spectrogram through its feature extractor, and
+        # falling back to the tokenizer asks it for text it will never get.
+        self.wants_processor = needs_endpoints(cfg)
 
         if start_layer == 0 and end_layer == 0:
             self.model_id = model_id
@@ -571,7 +582,7 @@ class ModelSlice:
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id, token=hf_token, cache_dir=cache_dir
         )
-        if not self.multimodal:
+        if not self.wants_processor:
             return
         try:
             from transformers import AutoProcessor

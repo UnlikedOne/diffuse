@@ -99,14 +99,18 @@ def test_capability_is_read_off_the_config_not_a_list():
     )
     assert both["inputs"] == ["text", "image", "video"]
 
+    # An encoder-decoder is served now: its encoder runs on the asking machine
+    # and only its output travels, which is the same bargain media already made.
     encoder_decoder = describe(
         {
             "architectures": ["WhisperForConditionalGeneration"],
             "num_hidden_layers": 12,
             "is_encoder_decoder": True,
+            "num_mel_bins": 80,
         }
     )
-    assert encoder_decoder["support"] == "unsupported"
+    assert encoder_decoder["support"] == "ready"
+    assert encoder_decoder["inputs"] == ["audio"], "a mel spectrogram means audio in"
     assert "encoder" in encoder_decoder["note"]
 
     recurrent = describe(
@@ -245,3 +249,36 @@ def test_several_output_heads_become_several_streams():
     single.slice = type("S", (), {"norm": None, "lm_head": torch.nn.Linear(8, 5)})()
     assert SliceRunner._head(single, torch.randn(1, 3, 8)).shape == (1, 3, 5)
     assert SliceRunner.stream_count(single) == 1
+
+
+def test_an_encoder_is_an_endpoint_never_a_stack_to_split():
+    """An encoder-decoder can carry an encoder as deep as its decoder.
+
+    Whisper has twelve layers on each side; picking the wrong twelve would
+    split the half that reads instead of the half that answers.
+    """
+    from diffuse_worker.slicing import _is_tower_tensor
+
+    assert _is_tower_tensor("model.encoder.layers.0.self_attn.q_proj.weight")
+    assert _is_tower_tensor("text_encoder.block.0.layer.0.SelfAttention.q.weight")
+    assert _is_tower_tensor("audio_encoder.encoder.layers.3.conv.bias")
+    assert not _is_tower_tensor("model.decoder.layers.0.self_attn.q_proj.weight")
+    assert not _is_tower_tensor("model.layers.0.mlp.up_proj.weight")
+
+
+def test_a_client_holds_endpoints_only_when_the_model_needs_them():
+    """A plain decoder asks nothing of the client but a tokenizer."""
+    from transformers import PretrainedConfig
+
+    from diffuse_worker.slicing import needs_endpoints
+
+    plain = PretrainedConfig()
+    plain.num_hidden_layers = 24
+    assert not needs_endpoints(plain)
+
+    # An encoder-decoder always needs its encoder run on the asking machine,
+    # and says so with a flag rather than with a sub-config.
+    seq2seq = PretrainedConfig()
+    seq2seq.num_hidden_layers = 12
+    seq2seq.is_encoder_decoder = True
+    assert needs_endpoints(seq2seq)

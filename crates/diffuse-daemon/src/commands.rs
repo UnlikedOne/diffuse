@@ -709,8 +709,19 @@ pub async fn query(
         .begin_generation(&session_id, prompt, media.clone(), max_tokens as u32)
         .await;
 
-    if let Ok((first, memory, streams, kind)) = generative {
-        if kind != "text" {
+    let generative = match generative {
+        Ok(started) => Some(started),
+        Err(e) => {
+            // Never swallow this: a model that should have answered with audio
+            // silently falling back to the text path is worse than a failure.
+            tracing::warn!("could not start a generative session: {:#}", e);
+            None
+        }
+    };
+    if let Some((Some(first), memory, streams, kind)) = generative {
+        // A model that answers in words but reads through an encoder still goes
+        // the generative way: what it needs is its memory carried, not its kind.
+        if kind != "text" || memory.is_some() {
             return run_generative(
                 &mut orch,
                 &mut tokenizer_worker,

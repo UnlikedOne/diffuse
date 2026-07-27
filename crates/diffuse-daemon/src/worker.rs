@@ -209,7 +209,7 @@ impl WorkerHandle {
         text: &str,
         media: Vec<(String, Vec<u8>, String)>,
         max_new_tokens: u32,
-    ) -> anyhow::Result<(Tensor, Option<Tensor>, u32, String)> {
+    ) -> anyhow::Result<(Option<Tensor>, Option<Tensor>, u32, String)> {
         let attachments: Vec<pb::MediaAttachment> = media
             .into_iter()
             .map(|(kind, data, mime)| pb::MediaAttachment { kind, data, mime })
@@ -228,10 +228,12 @@ impl WorkerHandle {
         if !response.ok {
             anyhow::bail!("could not start generation: {}", response.error);
         }
-        let first = response
-            .input_ids
-            .ok_or_else(|| anyhow::anyhow!("worker returned nothing to feed the network"))?;
-        Ok((first, response.encoder_memory, response.streams, response.output_kind))
+        Ok((
+            response.input_ids,
+            response.encoder_memory,
+            response.streams,
+            response.output_kind,
+        ))
     }
 
     pub async fn advance_generation(

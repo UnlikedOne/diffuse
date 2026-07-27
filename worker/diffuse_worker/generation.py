@@ -31,6 +31,25 @@ class GenerationSession:
                 return holder
         return None
 
+    def _encoder(self):
+        """The half that reads, wherever the checkpoint keeps it.
+
+        MusicGen calls it text_encoder, Whisper keeps it under model.encoder.
+        Both are the same thing to Diffuse: something the client runs once, on
+        its own machine, whose output is what actually travels."""
+        model = self.slice.model
+        for holder, name in (
+            (model, "text_encoder"),
+            (model, "encoder"),
+            (getattr(model, "model", None), "encoder"),
+        ):
+            if holder is None:
+                continue
+            encoder = getattr(holder, name, None)
+            if encoder is not None and callable(encoder):
+                return encoder
+        return None
+
     def _codec(self):
         """The thing that turns generated tokens back into bytes."""
         model = self.slice.model
@@ -74,20 +93,28 @@ class GenerationSession:
     @torch.inference_mode()
     def begin(self, inputs) -> torch.Tensor:
         """Prepare the first thing to feed the network, and the encoder memory."""
+        import inspect
+
         model = self.slice.model
-        encoder = getattr(model, "text_encoder", None)
+        encoder = self._encoder()
         if encoder is not None:
-            kwargs = {
-                k: v
-                for k, v in inputs.items()
-                if k in ("input_ids", "attention_mask")
-            }
+            accepted = set(inspect.signature(encoder.forward).parameters)
+            kwargs = {k: v for k, v in inputs.items() if k in accepted}
             encoded = encoder(**kwargs).last_hidden_state
             projection = getattr(model, "enc_to_dec_proj", None)
             self.memory = projection(encoded) if projection is not None else encoded
 
         decoder = self._decoder()
         if decoder is None:
+            if self.memory is not None:
+                # An encoder-decoder that answers in words starts its decoder on
+                # the token its generation config names, not on the prompt.
+                config = getattr(model, "generation_config", None)
+                start = getattr(config, "decoder_start_token_id", None)
+                if start is not None:
+                    self.buffer = torch.tensor([[int(start)]], dtype=torch.long)
+                    self.produced = []
+                    return self.buffer
             self.buffer = inputs["input_ids"]
             return self.buffer
 
@@ -109,9 +136,12 @@ class GenerationSession:
         """Take what the last slice returned and say what to feed next."""
         decoder = self._decoder()
         if decoder is None:
-            token = int(streams.reshape(-1)[0]) if streams.numel() else 0
+            token = int(streams.reshape(1, -1, streams.shape[-1])[0, -1].argmax())
+            eos = getattr(
+                getattr(self.slice.model, "generation_config", None), "eos_token_id", None
+            )
             self.produced.append(token)
-            if len(self.produced) >= self.max_new_tokens:
+            if len(self.produced) >= self.max_new_tokens or token == eos:
                 self.finished = True
                 return None
             return torch.tensor([[token]], dtype=torch.long)

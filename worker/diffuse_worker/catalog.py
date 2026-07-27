@@ -84,6 +84,10 @@ def describe(config: dict) -> dict:
     # what the processor is willing to splice in. Qwen2-VL declares no video
     # section but does declare a video token, and it does take video.
     inputs = ["text"]
+    # An encoder-decoder says what it reads through its feature extractor
+    # rather than through a sub-config: a mel spectrogram means audio in.
+    if config.get("num_mel_bins") or config.get("input_feat_per_channel"):
+        inputs = ["audio"]
     for section, modality in _MEDIA_SECTIONS.items():
         if isinstance(config.get(section), dict) and modality not in inputs:
             inputs.append(modality)
@@ -102,8 +106,8 @@ def describe(config: dict) -> dict:
         support, note = "unsupported", f"{arch or 'this architecture'} does not generate"
     elif encoder_decoder:
         support, note = (
-            "unsupported",
-            "encoder-decoder: its decoder reads the encoder at every layer",
+            "ready",
+            "encoder-decoder: its encoder runs on your machine, its output travels",
         )
     elif recurrent:
         support, note = (
