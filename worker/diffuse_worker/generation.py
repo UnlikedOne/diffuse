@@ -89,6 +89,29 @@ class GenerationSession:
                 return encoder
         return None
 
+    def _decoder_width(self) -> int | None:
+        for holder in (self.slice.model, getattr(self.slice.model, "decoder", None)):
+            config = getattr(holder, "config", None)
+            section = getattr(config, "decoder", config)
+            width = getattr(section, "hidden_size", None) if section is not None else None
+            if isinstance(width, int) and width > 0:
+                return width
+        return None
+
+    def _fit(self, encoded: torch.Tensor) -> torch.Tensor:
+        """The encoder's output, in the width the decoder reads.
+
+        Checkpoints carry a projection between the two towers whether or not
+        they need it, and applying it when the widths already agree is not what
+        the library does. The widths decide, not the presence of the module."""
+        projection = getattr(self.slice.model, "enc_to_dec_proj", None)
+        if projection is None:
+            return encoded
+        width = self._decoder_width()
+        if width is not None and encoded.shape[-1] == width:
+            return encoded
+        return projection(encoded)
+
     def _codec(self):
         """The thing that turns generated tokens back into bytes."""
         model = self.slice.model
@@ -138,9 +161,11 @@ class GenerationSession:
         if encoder is not None:
             accepted = set(inspect.signature(encoder.forward).parameters)
             kwargs = {k: v for k, v in inputs.items() if k in accepted}
-            encoded = encoder(**kwargs).last_hidden_state
-            projection = getattr(model, "enc_to_dec_proj", None)
-            self.memory = projection(encoded) if projection is not None else encoded
+            encoded = self._fit(encoder(**kwargs).last_hidden_state)
+            mask = inputs.get("attention_mask")
+            if mask is not None and mask.dim() == 2 and mask.shape[1] == encoded.shape[1]:
+                encoded = encoded * mask[..., None].to(encoded.dtype)
+            self.memory = encoded
             if self.guidance() > 1.0:
                 self.memory = torch.cat(
                     [self.memory, torch.zeros_like(self.memory)], dim=0
@@ -217,6 +242,35 @@ class GenerationSession:
             return None
         return self._feed(self.buffer[:, -1:], self.stream_count())
 
+    @staticmethod
+    def _to_waveform(codec, codes: torch.Tensor) -> torch.Tensor:
+        """Samples out of code books, whichever codec the checkpoint carries.
+
+        Encodec wants a frame axis and a list of scales, DAC wants the codes on
+        their own. Both are tried rather than assuming one, and the waveform is
+        found by shape: it is the only thing that came back with samples in it."""
+        attempts = (
+            lambda: codec.decode(codes.unsqueeze(0), [None]),
+            lambda: codec.decode(codes),
+            lambda: codec.decode(codes.unsqueeze(0)),
+        )
+        result = None
+        for attempt in attempts:
+            try:
+                result = attempt()
+                break
+            except (TypeError, ValueError, RuntimeError, IndexError):
+                continue
+        if result is None:
+            raise ValueError("this codec would not decode the generated codes")
+        for name in ("audio_values", "audio", "values"):
+            found = getattr(result, name, None)
+            if torch.is_tensor(found):
+                return found
+        if torch.is_tensor(result):
+            return result
+        raise ValueError("the codec returned no waveform")
+
     @torch.inference_mode()
     def finish(self) -> tuple[bytes, str, str]:
         """Turn what was generated into bytes the caller can keep."""
@@ -231,14 +285,17 @@ class GenerationSession:
         pad = getattr(config, "pad_token_id", 0)
         codes = decoder.apply_delay_pattern_mask(self.buffer, self.mask)
         codes = codes[codes != pad].reshape(1, self.stream_count(), -1)
-        audio = codec.decode(codes.unsqueeze(0), [None]).audio_values
+        audio = self._to_waveform(codec, codes)
 
         import soundfile
 
+        while audio.dim() > 2 and audio.shape[0] == 1:
+            audio = audio[0]
+        wave = audio.to(torch.float32).numpy()
+        if wave.ndim > 1:
+            wave = wave.T if wave.shape[0] < wave.shape[-1] else wave
         buffer = io.BytesIO()
-        soundfile.write(
-            buffer, audio[0, 0].to(torch.float32).numpy(), self.sampling_rate(), format="WAV"
-        )
+        soundfile.write(buffer, wave, self.sampling_rate(), format="WAV")
         return buffer.getvalue(), "audio/wav", ""
 
 

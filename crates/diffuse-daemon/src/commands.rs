@@ -149,10 +149,18 @@ async fn run_diffusion(
     orch: &mut crate::orchestrator::Orchestrator,
     worker: &mut WorkerHandle,
     session_id: &str,
-    started: (Tensor, crate::compute::Patch, u64, u32, String),
+    started: crate::worker::DiffusionStart,
     patches: usize,
 ) -> anyhow::Result<String> {
-    let (mut hidden, mut patch, mut sequence, blocks, kind) = started;
+    let crate::worker::DiffusionStart {
+        mut hidden,
+        mut patch,
+        mut sequence,
+        blocks,
+        kind,
+        max_patches,
+    } = started;
+    let mut allowed = if max_patches == 0 { patches } else { patches.min(max_patches) };
 
     println!(
         "  {} this model answers with {} by diffusion",
@@ -163,9 +171,15 @@ async fn run_diffusion(
         "  {} {} blocks, cut into {} patch{} per step",
         "→".bright_blue(),
         blocks.to_string().bright_white(),
-        patches.to_string().bright_white(),
-        if patches > 1 { "es" } else { "" }
+        allowed.to_string().bright_white(),
+        if allowed > 1 { "es" } else { "" }
     );
+    if allowed < patches {
+        println!(
+            "  {} this model carries two streams through its blocks, so a step stays whole",
+            "→".bright_blue()
+        );
+    }
     println!("  {} generating over encrypted channel...", "→".bright_blue());
     println!();
 
@@ -173,7 +187,7 @@ async fn run_diffusion(
     let mut calls = 0usize;
     let bar = start_spinner("denoising");
     loop {
-        let count = if calls == 0 { 1 } else { patches };
+        let count = if calls == 0 { 1 } else { allowed };
         let size = (sequence as usize).div_ceil(count.max(1));
         let mut pieces: Vec<Tensor> = Vec::with_capacity(count);
         let mut carried = std::mem::take(&mut patch.arguments);
@@ -194,10 +208,13 @@ async fn run_diffusion(
         let joined = join_rows(&pieces, &hidden)?;
         calls += 1;
         match worker.advance_diffusion(session_id, joined).await? {
-            Some((next, next_patch)) => {
+            Some((next, next_patch, ceiling)) => {
                 hidden = next;
                 sequence = next_patch.sequence;
                 patch = next_patch;
+                if ceiling > 0 {
+                    allowed = allowed.min(ceiling);
+                }
             }
             None => break,
         }
@@ -659,6 +676,13 @@ pub(crate) fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
 }
 
 pub(crate) async fn connect_worker(endpoint: &str, timeout: Duration) -> anyhow::Result<WorkerHandle> {
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        anyhow::bail!(
+            "the worker address {} has no scheme; write it as http://{}",
+            endpoint,
+            endpoint
+        );
+    }
     let start = std::time::Instant::now();
     loop {
         match WorkerHandle::connect(endpoint.to_string()).await {

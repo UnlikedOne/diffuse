@@ -238,6 +238,7 @@ message BeginDiffusionResponse {
   uint32 blocks = 7;
   string output_kind = 8;
   string branch = 9;
+  uint32 max_patches = 10;
 }
 
 message AdvanceDiffusionRequest {
@@ -254,6 +255,7 @@ message AdvanceDiffusionResponse {
   string layout = 6;
   uint64 sequence = 7;
   string branch = 8;
+  uint32 max_patches = 9;
 }
 
 message FinishDiffusionRequest {

@@ -95,22 +95,70 @@ returns a patch of hidden states.
 There is no list of supported diffusion families, and no per-model adapter. The
 mechanism finds what it needs by shape:
 
-- **The block stack** is whichever `ModuleList` of transformer blocks the model
-  exposes — `blocks`, `transformer_blocks`, `single_transformer_blocks`.
+- **The block stacks** are whichever `ModuleList`s of transformer blocks the
+  model exposes. Note the plural: Flux and HunyuanVideo run a joint stack and
+  then a single-stream stack, and both are split.
+- **How long each stack is** comes from the model's own config, but the config
+  does not say which setting governs which stack — `num_layers`,
+  `num_single_layers`, `depth`, and the names differ per family. Each integer
+  setting is nudged by one on a weightless copy of the model and the stack that
+  grew is the one it controls. Nothing to keep up to date.
 - **The two ends** are run by calling the pipeline's own code with the block
-  stack replaced by a stand-in. The pipeline prepares latents, conditions on the
+  stacks replaced by stand-ins. The pipeline prepares latents, conditions on the
   timestep, runs its scheduler and decodes with its VAE exactly as it always
-  does; Diffuse only intercepts the stack in the middle. No family-specific
+  does; Diffuse only intercepts the stacks in the middle. No family-specific
   logic is reimplemented, so nothing drifts out of date.
-- **The patch attention** is written against the projections every diffusers
-  attention exposes (`to_q`, `to_k`, `to_v`, `to_out`, and the optional query
-  and key norms), with rotary positions sliced to the patch for the query and
-  left whole for the context.
 - **What the model answers with** comes from its own parts: a VAE that declares
   a sampling rate means audio, a patch size with a time axis means video,
   anything else is a picture.
 
-A model that follows those conventions works without anyone adding it to a list.
+### What a block is handed, and what it gives back
+
+This is where being generic is actually hard. Diffusers calls its blocks in
+whichever style the family was written in: Wan passes everything positionally,
+Flux, SD3, LTX and Mochi pass by keyword, and the arguments are not all tensors
+— there are floats, integers and dictionaries in there.
+
+So a call is taken apart into a **plan**: which positions and which names it
+carried, which of them were tensors, and which small constants sit between them.
+The plan travels as JSON with the first call of each branch and is remembered by
+the node; only tensors that changed are sent again.
+
+The other half is subtler. A block returns one tensor for some families and two
+for others — Flux, SD3, CogVideoX, Mochi and HunyuanVideo carry an image stream
+and a text stream side by side through their blocks, and the order they come
+back in differs between them. Nothing declares this. It is learned instead: one
+block is run once, locally, and each tensor it returned is matched to the input
+it replaces. That mapping goes into the plan, so the node knows how to thread
+its loop.
+
+::: warning Two streams mean whole steps
+A model that carries two streams through its blocks is not cut into patches:
+splitting the image stream would give each patch its own version of the text
+stream, and there is only one right answer. Those models are still split across
+nodes block by block, which is exact — the step simply stays whole. The node
+says so when the generation starts and the client obeys, whatever `--patches`
+asked for.
+:::
+
+### Attention over a patch, checked rather than assumed
+
+Attention is the one place where being generic and being fast pull apart. The
+plain way is to hand the model's own attention the whole stale buffer and take
+the patch's rows back out of what it returns. That is right for every model,
+because it changes nothing the model does — but it computes the whole picture's
+attention for every patch.
+
+The quick way asks only for the patch's queries against the buffer's keys, which
+is what makes patching worth doing. It has to slice the rotary positions to the
+patch, and that means assuming how this family lays its rotary out.
+
+Diffuse does not take that on faith. On the first real patch of a session both
+are computed and compared; the quick one is kept only if it agreed with the
+plain one to a part in ten thousand. A family whose rotary convention is not the
+one assumed silently gets the correct path instead of a wrong picture.
+
+A model that follows these conventions works without anyone adding it to a list.
 One that does not will fail on load, loudly, rather than produce nonsense.
 
 ## Guidance doubles the work

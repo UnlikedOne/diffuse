@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 from concurrent import futures
@@ -13,21 +14,25 @@ from diffuse_worker.diffusion import (
     DiffusionSession,
     DiffusionStack,
     changed_arguments,
-    flatten_arguments,
     read_index,
-    rebuild_arguments,
 )
 from diffuse_worker.generation import GenerationSession, SessionStore
 from diffuse_worker.inference import MediaEmbedder, SliceRunner
 from diffuse_worker.slicing import ModelSlice
 
 logging.basicConfig(level=logging.INFO)
-def _branch_of(values):
+def _branch_of(stack, values):
+    """Which of the guided branches a call belongs to.
+
+    A model that runs classifier-free guidance calls the blocks twice per step
+    with the same shapes and different conditioning. The two must not share a
+    stale-activation buffer or an argument cache, and nothing in the call says
+    which is which, so they are told apart by what they carry."""
     for value in values:
         if value.dim() >= 2 and value.shape[1] > 1:
             flat = value.reshape(-1)[:64].to(torch.float32)
-            return f"{tuple(value.shape)}:{float(flat.sum()):.6e}"
-    return "single"
+            return f"{stack}:{tuple(value.shape)}:{float(flat.sum()):.6e}"
+    return f"{stack}:single"
 
 
 log = logging.getLogger("diffuse.worker")
@@ -502,13 +507,15 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                     state["layout"] = request.layout
                 values = [state["values"][i] for i in sorted(state["values"])]
                 layout = state["layout"]
-            arguments = rebuild_arguments(values, layout) if layout else tuple(values)
+            if not layout:
+                raise ValueError("no plan has been sent for this branch")
             out = self.stack.run_patch(
                 key,
                 proto_to_tensor(request.activations),
                 int(request.patch_offset),
                 int(request.patch_sequence),
-                arguments,
+                values,
+                json.loads(layout),
             )
             return data_pb2.SliceResponse(
                 session_id=request.session_id,
@@ -569,19 +576,26 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             log.exception("finish generation failed")
             return data_pb2.FinishGenerationResponse(ok=False, error=str(exc))
 
-    def _diffusion_step(self, session, item, first):
+    def _diffusion_step(self, session, item):
+        """One call into a block stack, ready for the wire.
+
+        Only what changed since the last call on this branch is sent: the text
+        conditioning and the positions are the same at every step, and they are
+        the bulk of what a block is handed."""
         if item is None:
             return None
-        hidden, arguments = item
-        values, layout = flatten_arguments(arguments)
-        branch = _branch_of(values)
+        hidden, values, plan = item
+        branch = _branch_of(plan["stack"], values)
         previous = session.branches.setdefault(branch, {})
         fresh = changed_arguments(previous, values)
         packed = [
             data_pb2.DiffusionArgument(index=index, value=tensor_to_proto(value))
             for index, value in sorted(fresh.items())
         ]
-        return hidden, packed, layout if first or branch not in session.told else "", branch
+        layout = json.dumps(plan)
+        told = session.told.get(branch)
+        session.told[branch] = layout
+        return hidden, packed, "" if told == layout else layout, branch
 
     def BeginDiffusion(self, request, context):
         token = self.config.hf_token or None
@@ -606,14 +620,13 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             )
             session.load()
             session.branches = {}
-            session.told = set()
+            session.told = {}
             kind = session.output_kind()
             blocks = session.blocks
-            step = self._diffusion_step(session, session.begin(), True)
+            step = self._diffusion_step(session, session.begin())
             if step is None:
                 raise ValueError("the pipeline produced no transformer call")
             hidden, packed, layout, branch = step
-            session.told.add(branch)
             with self._diffusion_lock:
                 self.diffusions[request.session_id] = session
             return data_pb2.BeginDiffusionResponse(
@@ -625,6 +638,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 blocks=blocks,
                 output_kind=kind,
                 branch=branch,
+                max_patches=session.max_patches,
             )
         except Exception as exc:
             log.exception("begin diffusion failed")
@@ -637,12 +651,11 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
             return data_pb2.AdvanceDiffusionResponse(ok=False, error="unknown session")
         try:
             step = self._diffusion_step(
-                session, session.advance(proto_to_tensor(request.hidden)), False
+                session, session.advance(proto_to_tensor(request.hidden))
             )
             if step is None:
                 return data_pb2.AdvanceDiffusionResponse(ok=True, finished=True)
             hidden, packed, layout, branch = step
-            session.told.add(branch)
             return data_pb2.AdvanceDiffusionResponse(
                 ok=True,
                 finished=False,
@@ -651,6 +664,7 @@ class InferenceWorkerServicer(data_pb2_grpc.InferenceWorkerServicer):
                 layout=layout,
                 sequence=hidden.shape[1],
                 branch=branch,
+                max_patches=session.max_patches,
             )
         except Exception as exc:
             log.exception("advance diffusion failed")

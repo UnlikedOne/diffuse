@@ -1,3 +1,12 @@
+pub struct DiffusionStart {
+    pub hidden: Tensor,
+    pub patch: crate::compute::Patch,
+    pub sequence: u64,
+    pub blocks: u32,
+    pub kind: String,
+    pub max_patches: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GenerativeStart {
     pub first: Option<crate::worker::pb::Tensor>,
@@ -170,7 +179,7 @@ impl WorkerHandle {
         frames: u32,
         guidance: f32,
         seed: u64,
-    ) -> anyhow::Result<(Tensor, crate::compute::Patch, u64, u32, String)> {
+    ) -> anyhow::Result<DiffusionStart> {
         let response = self
             .client
             .begin_diffusion(tonic::Request::new(pb::BeginDiffusionRequest {
@@ -204,20 +213,21 @@ impl WorkerHandle {
                 .filter_map(|a| a.value.map(|v| (a.index, v)))
                 .collect(),
         };
-        Ok((
+        Ok(DiffusionStart {
             hidden,
             patch,
-            response.sequence,
-            response.blocks,
-            response.output_kind,
-        ))
+            sequence: response.sequence,
+            blocks: response.blocks,
+            kind: response.output_kind,
+            max_patches: response.max_patches as usize,
+        })
     }
 
     pub async fn advance_diffusion(
         &mut self,
         session_id: &str,
         hidden: Tensor,
-    ) -> anyhow::Result<Option<(Tensor, crate::compute::Patch)>> {
+    ) -> anyhow::Result<Option<(Tensor, crate::compute::Patch, usize)>> {
         let response = self
             .client
             .advance_diffusion(tonic::Request::new(pb::AdvanceDiffusionRequest {
@@ -248,6 +258,7 @@ impl WorkerHandle {
                     .filter_map(|a| a.value.map(|v| (a.index, v)))
                     .collect(),
             },
+            response.max_patches as usize,
         )))
     }
 
