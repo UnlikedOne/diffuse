@@ -116,13 +116,33 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Take this tag's section out of the changelog
+        # The release notes are the changelog entry for this version, so there
+        # is nothing to paste by hand and the two cannot drift apart. A tag
+        # with no section fails here rather than publishing an empty release.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v want="## v${version}" '
+            $0 == want { found = 1; next }
+            /^## / { if (found) exit }
+            found
+          ' CHANGELOG.md | sed '/^---$/d' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no '## v${version}' section"
+            exit 1
+          fi
+          head -3 notes.md
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: notes.md
           files: dist/*
           fail_on_unmatched_files: true
