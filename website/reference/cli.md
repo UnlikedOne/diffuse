@@ -37,7 +37,7 @@ Ask one question, print the answer, exit.
 | `--bootstrap <urls>` | built-in sentinels | sentinels to discover the network |
 | `--max-tokens <n>` | 80 | maximum tokens to generate |
 | `--steps <n>` | 20 | denoising steps, for a model that answers by diffusion |
-| `--patches <n>` | 4 | pieces each denoising step is cut into across the nodes |
+| `--patches <n>` | 1 | pieces each denoising step is cut into across the nodes |
 | `--seed <n>` | 0 | same seed and prompt give the same answer |
 
 Attachments are consumed on your machine; only activations leave. When the model

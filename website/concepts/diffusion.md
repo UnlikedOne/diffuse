@@ -45,31 +45,55 @@ This is the technique published as
 the situation Diffuse is in: machines connected by something slower than a
 datacenter fabric.
 
-## What it costs
+## What it costs, measured on a real model
 
 Substituting one step's activations for another's is an approximation, so the
-question is how much the picture moves. Measured on a four-block Wan video
-transformer split over two stages, six denoising steps, against the same model
-run whole on one machine:
+question is how much the picture moves. Measured on **Wan2.1-T2V-1.3B**, thirty
+blocks split over two stages, 256×256, nine frames, twenty denoising steps,
+against the same model run whole on one machine:
 
-| Patches per step | Difference from the whole model | Bytes per transfer |
-|---|---|---|
-| 1 | **none — bit-identical** | 6,144 |
-| 2 | 0.032 / 255 | 3,072 |
-| 4 | 0.034 / 255 | 1,536 |
-| 8 | 0.037 / 255 | 768 |
-| 16 | 0.038 / 255 | 384 |
+| Patches per step | Difference from the whole model |
+|---|---|
+| 1 | **none — bit-identical** |
+| 2 | mean **36.5 / 255** |
+| 4 | mean **52.8 / 255** |
 
 Read the first row first: with a single patch there is no stale data to use, and
 the answer is **byte-for-byte** what the unsliced model produced. That is the row
 that says the machinery is right rather than merely plausible — the slicing, the
-attention rewrite, the client-side ends, the encryption, all of it.
+plan that carries the call, the client-side ends, the encryption, all of it. A
+model cut across machines costs nothing in fidelity.
 
-Then read down. The transfer shrinks sixteenfold and the difference does not
-grow: about a third of one greyscale level, on pixels that run from 0 to 255.
-Nobody has ever seen a third of a level.
+Now read the other rows, and be careful about what those numbers mean. Thirty-six
+levels of mean error sounds like a ruined picture. It is not. Side by side, the
+patched runs are **the same video**: the same paper boat, at the same angle, in
+the same rain, rippling the same way. What moves is tone. The colours come out
+warmer and more saturated, the soft shading on the paper hardens, and the
+reflection in the water changes character. The prompt is followed just as well;
+the picture is graded differently.
 
-::: warning The first step is not cut
+So the honest summary is a visible quality cost, not a failure — but a cost you
+should choose deliberately, which is why `--patches` defaults to **1**. Twenty
+steps is barely better than six (66 / 255 at four patches), so denoising longer
+does not buy it back.
+
+Why the tone shifts is worth stating. A video latent is flattened with time as
+the outer axis, so cutting the sequence into contiguous pieces cuts it mostly
+**along time**: each patch is roughly its own frame, and every patch attends to
+the other frames as they were one step ago. PipeFusion was published on image
+transformers, where a patch is a region of one picture and the neighbouring
+regions really do barely move. On video the same trick still holds the scene
+together, but it drifts the global statistics of the latent, and the VAE turns
+that drift into colour.
+
+::: warning Earlier numbers here were worthless
+This table used to report about a third of a greyscale level at sixteen patches.
+That was measured on a four-block toy transformer with random weights, where
+there is no picture to damage. It said nothing about a real model, and it was
+presented as though it did.
+:::
+
+::: warning The first step is never cut
 There is no previous step to borrow from, so the first denoising pass runs as a
 single patch over the whole picture. It is the slowest pass of the generation
 and it is unavoidable.
@@ -180,18 +204,19 @@ wall-clock time and is the obvious next step. It is not implemented.
 ```bash
 diffuse query --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   --prompt "a paper boat on a puddle" \
-  --steps 20 --patches 4 --seed 7
+  --steps 20 --seed 7
 ```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--steps` | 20 | denoising steps; more is slower and usually better |
-| `--patches` | 4 | pieces each step is cut into across the nodes |
+| `--patches` | 1 | pieces each step is cut into across the nodes |
 | `--seed` | 0 | same seed and prompt give the same answer |
 
-Raise `--patches` when the link between your nodes is the bottleneck; lower it
-when it is not. The answer is written next to you as an `.mp4`, `.wav` or
-`.png`, depending on what the model makes.
+Leave `--patches` at 1 unless the link between your nodes is the bottleneck.
+Raising it keeps the scene and costs you tone, which is a trade worth making
+when bandwidth is what you are short of. The answer is written next to you as an
+`.mp4`, `.wav` or `.png`, depending on what the model makes.
 
 ::: danger Diffusion on CPU is slow
 A 1.3B video model at 480p spends minutes per denoising step on a CPU node.

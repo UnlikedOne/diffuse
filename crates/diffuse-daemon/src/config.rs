@@ -82,7 +82,7 @@ pub enum Command {
         max_tokens: usize,
         #[arg(long, default_value_t = 20)]
         steps: usize,
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = 1)]
         patches: usize,
         #[arg(long, default_value_t = 0)]
         seed: u64,

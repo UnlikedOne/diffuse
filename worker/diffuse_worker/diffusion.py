@@ -156,8 +156,10 @@ class PatchAttention:
     model because it changes nothing the model does. The quick one asks only
     for the patch's queries, which is what makes patching worth doing but
     assumes how this model applies its rotary positions. Rather than trust that
-    assumption per family, both are run once on the first real patch and the
-    quick one is kept only if it agreed."""
+    assumption per family, both are run once and the quick one is kept only if
+    it agreed. The comparison waits for a patch that does not start at the
+    beginning: at offset zero the sliced positions are the same prefix either
+    way, so agreeing there would prove nothing about the slicing."""
 
     def __init__(self, attention):
         self.attention = attention
@@ -210,7 +212,7 @@ class PatchAttention:
             if quick is not None:
                 return quick
         exact = self._exact(attn, context, args, kwargs, start, stop)
-        if self.mode is None:
+        if self.mode is None and start > 0:
             quick = self._fast(attn, hidden_states, context, args, kwargs, start, stop)
             self.mode = "fast" if _agree(quick, exact) else "exact"
         return exact
@@ -490,9 +492,22 @@ class DiffusionSession:
             raise ValueError(f"{self.model_id} exposes no list of transformer blocks")
         self.blocks = sum(len(blocks) for _, blocks in holders)
         for name, blocks in holders:
-            self.originals[name] = blocks
+            self.originals[name] = blocks[0]
             setattr(self.transformer, name, torch.nn.ModuleList([_Relay(self, name)]))
+        del holders, blocks
+        self._release()
         return self
+
+    def _release(self):
+        """Let go of the blocks the nodes are going to run.
+
+        from_pretrained reads the whole transformer, and on a video model that
+        is most of the download. The client needs the two ends and one block —
+        the one that is run once to learn what a call returns — so the rest is
+        dropped here rather than sat on for the length of the generation."""
+        import gc
+
+        gc.collect()
 
     def output_kind(self) -> str:
         vae = getattr(self.pipeline, "vae", None)
@@ -515,7 +530,7 @@ class DiffusionSession:
         ):
             plan = None
         if plan is None:
-            plan = build_plan(stack, args, kwargs, self.originals[stack][0])
+            plan = build_plan(stack, args, kwargs, self.originals[stack])
             self.plans[stack] = plan
             if len(plan["state"]) > 1:
                 self.max_patches = 1

@@ -129,6 +129,9 @@ def test_the_quick_attention_is_only_kept_when_it_agrees(tmp_path):
     assert all(patcher.mode is None for patcher in stack.patchers)
 
     stack.run_patch("s", carried[:, :16], 0, sequence, tensors, plan)
+    assert all(patcher.mode is None for patcher in stack.patchers)
+
+    stack.run_patch("s", carried[:, 16:32], 16, sequence, tensors, plan)
     assert {patcher.mode for patcher in stack.patchers} == {"fast"}
 
 
