@@ -29,6 +29,17 @@ multimodal = [
     # so their processor cannot build a chat template without this.
     "mistral-common>=1.5",
 ]
+# Models that answer by denoising rather than by predicting a token: their
+# pipeline, and the writers that turn what it returns into a file.
+diffusion = [
+    "diffusers>=0.31",
+    "accelerate>=0.30",
+    "sentencepiece>=0.2",
+    "soundfile>=0.12",
+    "pillow>=10.0",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

@@ -5,18 +5,27 @@ REPO="UnlikedOne/diffuse"
 INSTALL_DIR="${HOME}/.diffuse"
 WORKER_DIR="${INSTALL_DIR}/worker"
 BIN_DIR="${HOME}/.local/bin"
-BINARY_NAME="diffuse-linux-x86_64"
 
 echo "Diffuse installer"
 echo
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
-if [ "$OS" != "Linux" ] || [ "$ARCH" != "x86_64" ]; then
-  echo "This installer currently supports Linux x86_64 only."
-  echo "On other platforms, build from source: cargo build --release"
-  exit 1
-fi
+
+case "${OS}/${ARCH}" in
+  Linux/x86_64)          BINARY_NAME="diffuse-linux-x86_64" ;;
+  Linux/aarch64|Linux/arm64) BINARY_NAME="diffuse-linux-aarch64" ;;
+  Darwin/x86_64)         BINARY_NAME="diffuse-macos-x86_64" ;;
+  Darwin/arm64)          BINARY_NAME="diffuse-macos-aarch64" ;;
+  *)
+    echo "No prebuilt binary for ${OS} ${ARCH}."
+    echo "Build from source instead:"
+    echo "    git clone https://github.com/${REPO}.git && cd diffuse && cargo build --release"
+    exit 1
+    ;;
+esac
+
+echo "Platform: ${OS} ${ARCH} -> ${BINARY_NAME}"
 
 for cmd in curl python3 git; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -28,9 +37,31 @@ done
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 echo "Downloading the latest diffuse binary..."
-LATEST_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
-curl -fsSL "$LATEST_URL" -o "${BIN_DIR}/diffuse"
+BASE="https://github.com/${REPO}/releases/latest/download"
+curl -fsSL "${BASE}/${BINARY_NAME}" -o "${BIN_DIR}/diffuse"
 chmod +x "${BIN_DIR}/diffuse"
+
+if curl -fsSL "${BASE}/${BINARY_NAME}.sha256" -o "${INSTALL_DIR}/diffuse.sha256" 2>/dev/null; then
+  EXPECTED="$(awk '{print $1}' "${INSTALL_DIR}/diffuse.sha256")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "${BIN_DIR}/diffuse" | awk '{print $1}')"
+  else
+    ACTUAL="$(shasum -a 256 "${BIN_DIR}/diffuse" | awk '{print $1}')"
+  fi
+  if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Checksum mismatch: the download does not match the published hash."
+    rm -f "${BIN_DIR}/diffuse"
+    exit 1
+  fi
+  echo "Checksum verified."
+  rm -f "${INSTALL_DIR}/diffuse.sha256"
+fi
+
+if [ "$OS" = "Darwin" ]; then
+  # Gatekeeper quarantines anything downloaded without a notarised signature.
+  xattr -d com.apple.quarantine "${BIN_DIR}/diffuse" 2>/dev/null || true
+fi
+
 echo "Binary installed to ${BIN_DIR}/diffuse"
 
 echo "Fetching the source..."
@@ -50,9 +81,14 @@ python3 -m venv "${WORKER_DIR}/.venv"
 source "${WORKER_DIR}/.venv/bin/activate"
 pip install --quiet --upgrade pip
 pip install --quiet "setuptools<82"
-pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+if [ "$OS" = "Darwin" ]; then
+  pip install --quiet torch
+else
+  pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+fi
 pip install --quiet transformers safetensors grpcio grpcio-tools protobuf numpy psutil huggingface_hub
-pip install --quiet -e "$WORKER_DIR"
+echo "Installing the media and diffusion extras..."
+pip install --quiet -e "${WORKER_DIR}[multimodal,diffusion]"
 
 echo "Generating protobuf stubs..."
 ( cd "$WORKER_DIR" && bash scripts/gen_proto.sh )

@@ -618,13 +618,29 @@ pub async fn host(
     Ok(())
 }
 
+/// Where a virtual environment keeps its interpreter, which is not the same
+/// place on every system: Windows puts it in `Scripts` and gives it a suffix.
+pub(crate) fn venv_python(worker_dir: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        worker_dir.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        worker_dir.join(".venv").join("bin").join("python")
+    }
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
 fn find_worker_dir() -> anyhow::Result<String> {
     if let Ok(dir) = std::env::var("DIFFUSE_WORKER_DIR") {
         return Ok(dir);
     }
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(std::path::PathBuf::from(&home).join(".diffuse/worker"));
+    if let Some(home) = home_dir() {
+        candidates.push(home.join(".diffuse").join("worker"));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -633,7 +649,7 @@ fn find_worker_dir() -> anyhow::Result<String> {
     }
     candidates.push(std::path::PathBuf::from("worker"));
     for c in &candidates {
-        if c.join(".venv/bin/python").exists() {
+        if venv_python(c).exists() {
             return Ok(c.to_string_lossy().into_owned());
         }
     }
@@ -663,7 +679,7 @@ impl Drop for WorkerGuard {
 
 pub(crate) fn spawn_local_worker(port: u16) -> anyhow::Result<WorkerGuard> {
     let worker_dir = find_worker_dir()?;
-    let python = format!("{}/.venv/bin/python", worker_dir);
+    let python = venv_python(std::path::Path::new(&worker_dir));
     let child = std::process::Command::new(python)
         .arg("-m")
         .arg("diffuse_worker")

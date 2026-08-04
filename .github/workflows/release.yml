@@ -4,34 +4,106 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to stamp into the binary (e.g. 0.2.9)'
+        required: false
 
 permissions:
   contents: write
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: diffuse-linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: diffuse-linux-aarch64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: diffuse-macos-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: diffuse-macos-aarch64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: diffuse-windows-x86_64.exe
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The version the binary reports comes from `git describe`, which
+          # needs the tags, and a shallow clone has none of them.
+          fetch-depth: 0
 
       - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Build release
-        run: cargo build --release --bin diffuse
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            export DIFFUSE_VERSION="${{ inputs.version }}"
+          fi
+          cargo build --release --locked --bin diffuse --target ${{ matrix.target }}
 
       - name: Package
+        shell: bash
         run: |
           mkdir -p dist
-          cp target/release/diffuse dist/diffuse-linux-x86_64
-          cd dist && sha256sum diffuse-linux-x86_64 > diffuse-linux-x86_64.sha256
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/diffuse.exe" "dist/${{ matrix.asset }}"
+          else
+            cp "target/${{ matrix.target }}/release/diffuse" "dist/${{ matrix.asset }}"
+            chmod +x "dist/${{ matrix.asset }}"
+          fi
+          cd dist
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - name: Check the binary runs
+        shell: bash
+        run: ./dist/${{ matrix.asset }} --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/diffuse-linux-x86_64
-            dist/diffuse-linux-x86_64.sha256
+          files: dist/*
+          fail_on_unmatched_files: true

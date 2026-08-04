@@ -36,15 +36,33 @@ The network belongs to the people running it. That is the entire point.
 
 ## Install
 
-One command. Linux x86_64.
+One command. Nothing to build — the binary is prebuilt for your machine.
+
+**Linux and macOS** (Intel or Apple Silicon):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/UnlikedOne/diffuse/main/install.sh | bash
 ```
 
-This downloads the `diffuse` binary, sets up the Python worker, and puts everything in place. No account, no API key, no server of your own.
+**Windows** (PowerShell):
 
-> **Prefer to read before you run?** The script is [`install.sh`](install.sh). Read it, then pipe it to bash.
+```powershell
+irm https://raw.githubusercontent.com/UnlikedOne/diffuse/main/install.ps1 | iex
+```
+
+This downloads the `diffuse` binary, checks its published checksum, sets up the Python worker, and puts everything in place. No account, no API key, no server of your own, and no Rust toolchain.
+
+| Platform | Binary |
+|---|---|
+| Linux x86_64 | `diffuse-linux-x86_64` |
+| Linux aarch64 (ARM) | `diffuse-linux-aarch64` |
+| macOS Apple Silicon | `diffuse-macos-aarch64` |
+| macOS Intel | `diffuse-macos-x86_64` |
+| Windows x86_64 | `diffuse-windows-x86_64.exe` |
+
+Anything else builds from source with `cargo build --release`.
+
+> **Prefer to read before you run?** The scripts are [`install.sh`](install.sh) and [`install.ps1`](install.ps1). Read one, then run it.
 
 ---
 
