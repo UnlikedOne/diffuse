@@ -17,6 +17,10 @@ jobs:
   build:
     name: ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
+    # A label with no runner behind it waits forever rather than failing, so
+    # give every job a ceiling: an image that has been retired should cost
+    # twenty minutes, not an afternoon.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -24,18 +28,26 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset: diffuse-linux-x86_64
+            native: true
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             asset: diffuse-linux-aarch64
-          - os: macos-13
+            native: true
+          # Both macOS binaries are built on Apple Silicon. Intel runner images
+          # are retired, and Apple's own toolchain cross-compiles to x86_64
+          # without anything extra, so this needs no Intel machine to exist.
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset: diffuse-macos-x86_64
-          - os: macos-14
+            native: false
+          - os: macos-latest
             target: aarch64-apple-darwin
             asset: diffuse-macos-aarch64
+            native: true
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             asset: diffuse-windows-x86_64.exe
+            native: true
 
     steps:
       - uses: actions/checkout@v4
@@ -84,8 +96,15 @@ jobs:
           fi
 
       - name: Check the binary runs
+        # Only where the runner can execute what was just built. The Intel
+        # macOS binary is cross-compiled and has no host here to try it on.
+        if: matrix.native
         shell: bash
         run: ./dist/${{ matrix.asset }} --version
+
+      - name: Check the cross-built binary is for the right machine
+        if: ${{ !matrix.native }}
+        run: file "dist/${{ matrix.asset }}" | grep -q "x86_64"
 
       - uses: actions/upload-artifact@v4
         with:
