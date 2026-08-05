@@ -82,9 +82,9 @@ source "${WORKER_DIR}/.venv/bin/activate"
 pip install --quiet --upgrade pip
 pip install --quiet "setuptools<82"
 if [ "$OS" = "Darwin" ]; then
-  pip install --quiet torch
+  pip install --quiet torch torchvision
 else
-  pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+  pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
 fi
 pip install --quiet transformers safetensors grpcio grpcio-tools protobuf numpy psutil huggingface_hub
 echo "Installing the media and diffusion extras..."

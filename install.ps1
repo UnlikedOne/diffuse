@@ -65,7 +65,7 @@ python -m venv (Join-Path $workerDir ".venv")
 $py = Join-Path $workerDir ".venv\Scripts\python.exe"
 & $py -m pip install --quiet --upgrade pip
 & $py -m pip install --quiet "setuptools<82"
-& $py -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+& $py -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
 & $py -m pip install --quiet transformers safetensors grpcio grpcio-tools protobuf numpy psutil huggingface_hub
 Write-Host "Installing the media and diffusion extras..."
 & $py -m pip install --quiet -e "$workerDir[multimodal,diffusion]"
